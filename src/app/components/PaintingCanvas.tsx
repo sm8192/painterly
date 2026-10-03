@@ -15,6 +15,11 @@ interface PaintingCanvasProps {
   stagePauseMs?: number;
   /** How fast the brush travels, in canvas px per frame. */
   strokeSpeed?: number;
+  /**
+   * How many candidate strokes to simulate per move. The one that best
+   * reduces the difference from the target image is the one that gets painted.
+   */
+  candidatesPerStroke?: number;
 }
 
 /** Human-readable label for each stage, coarse → fine. */
@@ -38,11 +43,19 @@ interface Cell {
   cx: number;
   cy: number;
   color: string;
+  /** The same color as numeric channels, for fast scoring. */
+  r: number;
+  g: number;
+  b: number;
 }
 
 /** A brush stroke that animates along a curved path over several frames. */
 interface Stroke {
   color: string;
+  /** Stroke color as numeric channels, mirroring `color`. */
+  r: number;
+  g: number;
+  b: number;
   width: number;
   /** Total path length in px. */
   length: number;
@@ -70,6 +83,7 @@ export default function PaintingCanvas({
   onDone,
   stagePauseMs = 550,
   strokeSpeed = 3,
+  candidatesPerStroke = 20,
 }: PaintingCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -129,6 +143,19 @@ export default function PaintingCanvas({
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, width, height);
 
+      // An in-memory mirror of what's currently painted, initialized to white.
+      // We score candidate strokes against this + the target without touching
+      // the visible canvas, then update it when the winning stroke is drawn.
+      const currentR = new Uint8ClampedArray(width * height).fill(255);
+      const currentG = new Uint8ClampedArray(width * height).fill(255);
+      const currentB = new Uint8ClampedArray(width * height).fill(255);
+
+      const pixelIndex = (x: number, y: number): number => {
+        const cx = Math.min(width - 1, Math.max(0, Math.floor(x)));
+        const cy = Math.min(height - 1, Math.max(0, Math.floor(y)));
+        return cy * width + cx;
+      };
+
       // Local luminance, used to orient strokes along image contours.
       const luminanceAt = (x: number, y: number): number => {
         const cx = Math.min(width - 1, Math.max(0, Math.floor(x)));
@@ -170,6 +197,9 @@ export default function PaintingCanvas({
             const i = (row * cols + col) * 4;
             const x = col * cellSize;
             const y = row * cellSize;
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
             cells.push({
               x,
               y,
@@ -177,9 +207,10 @@ export default function PaintingCanvas({
               h: cellSize,
               cx: x + cellSize / 2,
               cy: y + cellSize / 2,
-              color: `rgba(${data[i]}, ${data[i + 1]}, ${data[i + 2]}, ${
-                data[i + 3] / 255
-              })`,
+              color: `rgba(${r}, ${g}, ${b}, ${data[i + 3] / 255})`,
+              r,
+              g,
+              b,
             });
           }
         }
@@ -276,26 +307,35 @@ export default function PaintingCanvas({
 
       const indexes: NearestCells[] = stages.map((cells) => new NearestCells(cells));
 
-      // Turn a cell into a stroke plan: focal start point near the cell center,
-      // heading along the local contour, length/width scaled to the cell.
-      const planStroke = (cell: Cell, stage: number): Stroke => {
-        const jitter = cell.w * 0.25;
+      // Generate one *candidate* stroke for a cell. Candidates share the cell's
+      // color and focal area but vary in start jitter, heading, length,
+      // curvature, and width, so we can simulate several and keep the best.
+      const makeCandidate = (cell: Cell, stage: number): Stroke => {
+        const jitter = cell.w * 0.3;
         const x0 = cell.cx + (Math.random() - 0.5) * jitter;
         const y0 = cell.cy + (Math.random() - 0.5) * jitter;
-        const angle = contourAngleAt(cell.cx, cell.cy);
+        // Base heading follows the local contour; candidates deviate a little.
+        const baseAngle = contourAngleAt(cell.cx, cell.cy);
+        const angle = baseAngle + (Math.random() - 0.5) * 0.9;
         // Longer, bolder strokes early; shorter, fine strokes late.
         const lengthFactor = stage <= 1 ? 4.5 : stage <= 3 ? 3.2 : 2.2;
-        const length = Math.max(cell.w, cell.h) * lengthFactor;
-        const width = Math.max(1, stage <= 2 ? cell.h * 0.9 : cell.h * 0.7);
+        const length =
+          Math.max(cell.w, cell.h) * lengthFactor * (0.5 + Math.random());
+        const width =
+          Math.max(1, stage <= 2 ? cell.h * 0.9 : cell.h * 0.7) *
+          (0.75 + Math.random() * 0.5);
         return {
           color: cell.color,
+          r: cell.r,
+          g: cell.g,
+          b: cell.b,
           width,
           length,
           drawn: 0,
           x0,
           y0,
           angle,
-          curvature: (Math.random() - 0.5) * 0.05,
+          curvature: (Math.random() - 0.5) * 0.08,
         };
       };
 
@@ -303,6 +343,79 @@ export default function PaintingCanvas({
       const pointAt = (s: Stroke, d: number): [number, number] => {
         const a = s.angle + s.curvature * d;
         return [s.x0 + Math.cos(a) * d, s.y0 + Math.sin(a) * d];
+      };
+
+      // Score a candidate by how much it would reduce the difference between
+      // the current painting and the target image. For sample points along the
+      // path (and across the brush width), we compare the squared color error
+      // before (current canvas vs target) and after (stroke color vs target).
+      // A positive score means the stroke makes the painting more accurate.
+      const scoreStroke = (s: Stroke): number => {
+        const stepPx = Math.max(2, s.width * 0.6);
+        const steps = Math.max(2, Math.round(s.length / stepPx));
+        const halfW = s.width / 2;
+        // Sample the center plus two offsets across the brush width.
+        const offsets = [-halfW * 0.6, 0, halfW * 0.6];
+
+        let improvement = 0;
+        for (let i = 0; i <= steps; i++) {
+          const d = (i / steps) * s.length;
+          const [px, py] = pointAt(s, d);
+          // Perpendicular direction for width sampling.
+          const a = s.angle + s.curvature * d + Math.PI / 2;
+          const ox = Math.cos(a);
+          const oy = Math.sin(a);
+
+          for (const off of offsets) {
+            const sx = px + ox * off;
+            const sy = py + oy * off;
+            if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+            const idx = pixelIndex(sx, sy);
+            const ti = idx * 4;
+            const tr = pixels[ti];
+            const tg = pixels[ti + 1];
+            const tb = pixels[ti + 2];
+
+            // Error of the current canvas vs the target at this pixel.
+            const dcr = currentR[idx] - tr;
+            const dcg = currentG[idx] - tg;
+            const dcb = currentB[idx] - tb;
+            const errBefore = dcr * dcr + dcg * dcg + dcb * dcb;
+
+            // Error if we painted the stroke color here instead.
+            const dsr = s.r - tr;
+            const dsg = s.g - tg;
+            const dsb = s.b - tb;
+            const errAfter = dsr * dsr + dsg * dsg + dsb * dsb;
+
+            improvement += errBefore - errAfter;
+          }
+        }
+        return improvement;
+      };
+
+      // Write the stroke's color into the in-memory mirror along a path
+      // segment, so later candidate scoring reflects what we actually painted.
+      const commitToMirror = (s: Stroke, from: number, to: number) => {
+        const stepPx = Math.max(1, s.width * 0.4);
+        const steps = Math.max(1, Math.round((to - from) / stepPx));
+        const halfW = s.width / 2;
+        for (let i = 0; i <= steps; i++) {
+          const d = from + ((to - from) * i) / steps;
+          const [px, py] = pointAt(s, d);
+          const a = s.angle + s.curvature * d + Math.PI / 2;
+          const ox = Math.cos(a);
+          const oy = Math.sin(a);
+          for (let off = -halfW; off <= halfW; off += 1) {
+            const sx = px + ox * off;
+            const sy = py + oy * off;
+            if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+            const idx = pixelIndex(sx, sy);
+            currentR[idx] = s.r;
+            currentG[idx] = s.g;
+            currentB[idx] = s.b;
+          }
+        }
       };
 
       let currentStage = 0;
@@ -317,16 +430,32 @@ export default function PaintingCanvas({
       const totalCells = stages.reduce((sum, s) => sum + s.length, 0);
       let completedCells = 0;
 
-      // Pick the next stroke: the unpainted cell nearest the previous endpoint.
+      // Pick the next stroke: take the unpainted cell nearest the previous
+      // endpoint, simulate several candidate strokes there, and keep the one
+      // that best matches the target image.
       const beginNextStroke = (): boolean => {
         if (currentStage >= stages.length) return false;
         const cell = indexes[currentStage].take(lastX, lastY);
         if (!cell) return false;
-        current = planStroke(cell, currentStage);
-        return true;
+
+        let best: Stroke | null = null;
+        let bestScore = -Infinity;
+        const n = Math.max(1, candidatesPerStroke);
+        for (let i = 0; i < n; i++) {
+          const candidate = makeCandidate(cell, currentStage);
+          const score = scoreStroke(candidate);
+          if (score > bestScore) {
+            bestScore = score;
+            best = candidate;
+          }
+        }
+
+        current = best;
+        return current !== null;
       };
 
-      // Commit one path segment of a stroke onto the base canvas.
+      // Commit one path segment of a stroke onto the base canvas, and mirror
+      // the same paint into the in-memory buffer used for candidate scoring.
       const commitSegment = (s: Stroke, from: number, to: number) => {
         const [ax, ay] = pointAt(s, from);
         const [bx, by] = pointAt(s, to);
@@ -338,6 +467,7 @@ export default function PaintingCanvas({
         ctx.lineTo(bx, by);
         ctx.stroke();
         ctx.globalAlpha = 1;
+        commitToMirror(s, from, to);
       };
 
       const updateProgress = () => {
@@ -427,7 +557,7 @@ export default function PaintingCanvas({
     return () => {
       cancelled = true;
     };
-  }, [src, maxSize, stagePauseMs, strokeSpeed]);
+  }, [src, maxSize, stagePauseMs, strokeSpeed, candidatesPerStroke]);
 
   useEffect(() => {
     const cleanupImage = paint();
