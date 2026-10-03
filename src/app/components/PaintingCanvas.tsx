@@ -71,10 +71,7 @@ export default function PaintingCanvas({
   stagePauseMs = 550,
   strokeSpeed = 3,
 }: PaintingCanvasProps) {
-  // Committed paint lives on the base canvas; moving brush tips are drawn on
-  // an overlay that's cleared every frame so tips don't leave ghost trails.
   const baseRef = useRef<HTMLCanvasElement>(null);
-  const tipRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -95,11 +92,9 @@ export default function PaintingCanvas({
 
   const paint = useCallback(() => {
     const base = baseRef.current;
-    const tip = tipRef.current;
-    if (!base || !tip) return;
+    if (!base) return;
     const ctx = base.getContext("2d");
-    const tipCtx = tip.getContext("2d");
-    if (!ctx || !tipCtx) return;
+    if (!ctx) return;
 
     let cancelled = false;
     const image = new Image();
@@ -113,17 +108,13 @@ export default function PaintingCanvas({
       const height = Math.max(1, Math.round(image.height * scale));
       const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
 
-      for (const c of [base, tip]) {
-        c.width = Math.round(width * dpr);
-        c.height = Math.round(height * dpr);
-        c.style.width = `${width}px`;
-        c.style.height = `${height}px`;
-      }
+      base.width = Math.round(width * dpr);
+      base.height = Math.round(height * dpr);
+      base.style.width = `${width}px`;
+      base.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      tipCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      tipCtx.lineCap = "round";
 
       // Full-resolution source for sampling + the final exact pass.
       const source = document.createElement("canvas");
@@ -292,8 +283,8 @@ export default function PaintingCanvas({
         const x0 = cell.cx + (Math.random() - 0.5) * jitter;
         const y0 = cell.cy + (Math.random() - 0.5) * jitter;
         const angle = contourAngleAt(cell.cx, cell.cy);
-        // Longer, bolder strokes early; short, fine strokes late.
-        const lengthFactor = stage <= 1 ? 2.2 : stage <= 3 ? 1.6 : 1.1;
+        // Longer, bolder strokes early; shorter, fine strokes late.
+        const lengthFactor = stage <= 1 ? 4.5 : stage <= 3 ? 3.2 : 2.2;
         const length = Math.max(cell.w, cell.h) * lengthFactor;
         const width = Math.max(1, stage <= 2 ? cell.h * 0.9 : cell.h * 0.7);
         return {
@@ -349,20 +340,6 @@ export default function PaintingCanvas({
         ctx.globalAlpha = 1;
       };
 
-      // Draw a soft moving brush tip on the overlay at the stroke's head.
-      const drawTip = (s: Stroke) => {
-        const [hx, hy] = pointAt(s, s.drawn);
-        const r = s.width * 0.7;
-        const grad = tipCtx.createRadialGradient(hx, hy, 0, hx, hy, r);
-        grad.addColorStop(0, "rgba(255,255,255,0.55)");
-        grad.addColorStop(0.5, s.color);
-        grad.addColorStop(1, "rgba(0,0,0,0)");
-        tipCtx.fillStyle = grad;
-        tipCtx.beginPath();
-        tipCtx.arc(hx, hy, r, 0, Math.PI * 2);
-        tipCtx.fill();
-      };
-
       const updateProgress = () => {
         setProgress(Math.min(0.999, completedCells / (totalCells + 1)));
       };
@@ -386,7 +363,6 @@ export default function PaintingCanvas({
 
       const runExactFinalPass = () => {
         if (cancelled) return;
-        tipCtx.clearRect(0, 0, width, height);
         setStageIndex(stages.length);
         setStageLabel(STAGE_LABELS[STAGE_LABELS.length - 1]);
         ctx.drawImage(source, 0, 0, width, height); // identical to original
@@ -414,8 +390,7 @@ export default function PaintingCanvas({
         }
 
         // Advance the single current stroke by strokeSpeed px, committing the
-        // newly traversed segment, and show the moving brush tip.
-        tipCtx.clearRect(0, 0, width, height);
+        // newly traversed segment to the canvas.
         const s = current!;
         const from = s.drawn;
         const to = Math.min(s.length, s.drawn + strokeSpeed);
@@ -429,8 +404,6 @@ export default function PaintingCanvas({
           lastY = ey;
           current = null;
           completedCells++;
-        } else {
-          drawTip(s);
         }
 
         updateProgress();
@@ -474,14 +447,8 @@ export default function PaintingCanvas({
 
   return (
     <div className="flex w-full flex-col items-center gap-3">
-      <div className="relative overflow-hidden rounded-xl shadow-lg ring-1 ring-black/5 dark:ring-white/10">
-        {/* Base canvas holds committed paint; tip canvas shows moving brushes. */}
+      <div className="overflow-hidden rounded-xl shadow-lg ring-1 ring-black/5 dark:ring-white/10">
         <canvas ref={baseRef} className="block max-w-full" />
-        <canvas
-          ref={tipRef}
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 h-full w-full"
-        />
       </div>
 
       <div className="flex w-full max-w-md flex-col gap-1.5">
