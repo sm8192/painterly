@@ -9,6 +9,26 @@ export default function PainterlyApp() {
   const [replayKey, setReplayKey] = useState(0);
   const [done, setDone] = useState(false);
 
+  // Draft values track the slider thumb live; applied values are what the
+  // canvas actually uses. We commit draft → applied on release so dragging a
+  // slider doesn't restart the painting on every tick.
+  const [speedDraft, setSpeedDraft] = useState(3);
+  const [speed, setSpeed] = useState(3);
+  const [candidatesDraft, setCandidatesDraft] = useState(20);
+  const [candidates, setCandidates] = useState(20);
+
+  const commitSpeed = useCallback(() => {
+    setSpeed(speedDraft);
+    setDone(false);
+    setReplayKey((k) => k + 1);
+  }, [speedDraft]);
+
+  const commitCandidates = useCallback(() => {
+    setCandidates(candidatesDraft);
+    setDone(false);
+    setReplayKey((k) => k + 1);
+  }, [candidatesDraft]);
+
   // Derive the object URL from the file during render (no effect/setState).
   const url = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
 
@@ -47,7 +67,53 @@ export default function PainterlyApp() {
         src={url}
         replayKey={replayKey}
         onDone={handleDone}
+        strokeSpeed={speed}
+        candidatesPerStroke={candidates}
       />
+
+      <div className="grid w-full max-w-md grid-cols-1 gap-4 sm:grid-cols-2">
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="flex items-center justify-between text-zinc-700 dark:text-zinc-300">
+            <span className="font-medium">Brush speed</span>
+            <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
+              {speedDraft} px/frame
+            </span>
+          </span>
+          <input
+            type="range"
+            min={1}
+            max={12}
+            step={1}
+            value={speedDraft}
+            onChange={(e) => setSpeedDraft(Number(e.target.value))}
+            onPointerUp={commitSpeed}
+            onKeyUp={commitSpeed}
+            className="w-full accent-indigo-600"
+            aria-label="Brush speed in pixels per frame"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="flex items-center justify-between text-zinc-700 dark:text-zinc-300">
+            <span className="font-medium">Candidates per stroke</span>
+            <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
+              {candidatesDraft}
+            </span>
+          </span>
+          <input
+            type="range"
+            min={1}
+            max={60}
+            step={1}
+            value={candidatesDraft}
+            onChange={(e) => setCandidatesDraft(Number(e.target.value))}
+            onPointerUp={commitCandidates}
+            onKeyUp={commitCandidates}
+            className="w-full accent-indigo-600"
+            aria-label="Number of candidate strokes simulated per move"
+          />
+        </label>
+      </div>
 
       <div className="flex flex-wrap items-center justify-center gap-3">
         <button
