@@ -7,47 +7,66 @@ interface PaintingCanvasProps {
   src: string;
   /** Longest edge of the painting in CSS pixels. Defaults to 640. */
   maxSize?: number;
-  /** How many brushstrokes to lay down per animation frame. */
-  strokesPerFrame?: number;
   /** Signal used to restart the animation. Changing it replays from scratch. */
   replayKey?: number;
   /** Called when the painting finishes. */
   onDone?: () => void;
+  /** Pause between stages, in ms, so each stage reads as a distinct step. */
+  stagePauseMs?: number;
+  /** How many cells to paint per animation frame. Lower = slower/calmer. */
+  cellsPerFrame?: number;
 }
 
+/** Human-readable label for each stage, coarse → fine. */
+const STAGE_LABELS = [
+  "Blocking in base shapes",
+  "Massing in color",
+  "Shaping forms",
+  "Building midtones",
+  "Adding detail",
+  "Refining fine detail",
+  "Final pass",
+];
+
 /**
- * Progressive "painting" renderer. Draws the source image onto a hidden
- * canvas to read its pixels, then animates brushstrokes onto a visible canvas,
- * working coarse-to-fine so the picture resolves gradually.
+ * Staged "painting" renderer. Starts from a blank canvas and works through
+ * discrete coarse-to-fine stages: each stage repaints the whole canvas on a
+ * grid of average-color dabs, finer than the last, with a short pause between
+ * stages. The final stage draws the real image at full resolution, so the
+ * result is pixel-identical to the original.
  */
 export default function PaintingCanvas({
   src,
   maxSize = 640,
-  strokesPerFrame = 220,
   replayKey = 0,
   onDone,
+  stagePauseMs = 650,
+  cellsPerFrame = 24,
 }: PaintingCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [progress, setProgress] = useState(0);
   const [isReady, setIsReady] = useState(false);
+  const [stageIndex, setStageIndex] = useState(0);
+  const [stageCount, setStageCount] = useState(STAGE_LABELS.length);
+  const [stageLabel, setStageLabel] = useState(STAGE_LABELS[0]);
+  const [finished, setFinished] = useState(false);
 
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     let cancelled = false;
     const image = new Image();
-    // Allow reading pixels for data URLs / same-origin object URLs.
     image.crossOrigin = "anonymous";
 
     image.onload = () => {
       if (cancelled) return;
 
-      // Scale so the longest edge is maxSize, preserving aspect ratio.
       const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
       const width = Math.max(1, Math.round(image.width * scale));
       const height = Math.max(1, Math.round(image.height * scale));
@@ -58,114 +77,168 @@ export default function PaintingCanvas({
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
 
-      // Read the source pixels from an offscreen canvas.
+      // Keep the full-resolution source around for the final exact pass.
       const source = document.createElement("canvas");
       source.width = width;
       source.height = height;
-      const sourceCtx = source.getContext("2d", { willReadFrequently: true });
+      const sourceCtx = source.getContext("2d");
       if (!sourceCtx) return;
       sourceCtx.drawImage(image, 0, 0, width, height);
-      const pixels = sourceCtx.getImageData(0, 0, width, height).data;
 
-      // Start from a muted average-ish wash so gaps don't flash white.
-      ctx.fillStyle = "#d9d4cc";
+      // Start from a genuinely blank (white) canvas.
+      ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, width, height);
 
-      const colorAt = (x: number, y: number): string => {
-        const cx = Math.min(width - 1, Math.max(0, Math.floor(x)));
-        const cy = Math.min(height - 1, Math.max(0, Math.floor(y)));
-        const i = (cy * width + cx) * 4;
-        return `rgba(${pixels[i]}, ${pixels[i + 1]}, ${pixels[i + 2]}, ${
-          pixels[i + 3] / 255
-        })`;
-      };
+      // Define the grid resolution (cells across the longest edge) for each
+      // painterly stage, coarse → fine. The last stage is handled specially
+      // as an exact pixel copy, so it has no grid here.
+      const gridStages = [6, 12, 24, 48, 96, 180];
+      const totalStages = gridStages.length + 1; // + exact final pass
+      setStageCount(totalStages);
 
-      // Sample a local gradient so strokes follow edges (perpendicular to it).
-      const luminanceAt = (x: number, y: number): number => {
-        const cx = Math.min(width - 1, Math.max(0, Math.floor(x)));
-        const cy = Math.min(height - 1, Math.max(0, Math.floor(y)));
-        const i = (cy * width + cx) * 4;
-        return 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
-      };
+      // Precompute, for each grid stage, the average color of every cell by
+      // downscaling the source to that grid and reading the pixels back.
+      type Cell = { x: number; y: number; w: number; h: number; color: string };
+      const stages: Cell[][] = gridStages.map((cellsAcross) => {
+        const longest = Math.max(width, height);
+        const cellSize = Math.max(1, Math.round(longest / cellsAcross));
+        const cols = Math.ceil(width / cellSize);
+        const rows = Math.ceil(height / cellSize);
 
-      const strokeAngleAt = (x: number, y: number): number => {
-        const gx = luminanceAt(x + 1, y) - luminanceAt(x - 1, y);
-        const gy = luminanceAt(x, y + 1) - luminanceAt(x, y - 1);
-        if (gx === 0 && gy === 0) {
-          return Math.random() * Math.PI; // flat area: random direction
+        // Downscale to cols×rows; each downscaled pixel ≈ that cell's average.
+        const small = document.createElement("canvas");
+        small.width = cols;
+        small.height = rows;
+        const smallCtx = small.getContext("2d", { willReadFrequently: true });
+        if (!smallCtx) return [];
+        smallCtx.imageSmoothingEnabled = true;
+        smallCtx.imageSmoothingQuality = "high";
+        smallCtx.drawImage(source, 0, 0, width, height, 0, 0, cols, rows);
+        const data = smallCtx.getImageData(0, 0, cols, rows).data;
+
+        const cells: Cell[] = [];
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const i = (row * cols + col) * 4;
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            const a = data[i + 3] / 255;
+            cells.push({
+              x: col * cellSize,
+              y: row * cellSize,
+              w: cellSize,
+              h: cellSize,
+              color: `rgba(${r}, ${g}, ${b}, ${a})`,
+            });
+          }
         }
-        // Stroke runs perpendicular to the gradient (along the edge).
-        return Math.atan2(gy, gx) + Math.PI / 2;
+        return cells;
+      });
+
+      // Paint one dab for a cell. Early (large) stages get rounder, overlapping
+      // dabs for a soft blocked-in look; finer stages get tighter coverage.
+      const paintCell = (cell: Cell, stage: number) => {
+        ctx.fillStyle = cell.color;
+        const overlap = stage <= 1 ? 1.35 : stage <= 3 ? 1.15 : 1.0;
+        const w = cell.w * overlap;
+        const h = cell.h * overlap;
+        const cx = cell.x + cell.w / 2;
+        const cy = cell.y + cell.h / 2;
+
+        if (stage <= 2) {
+          // Soft elliptical dabs for the rough early stages.
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          // Rectangular coverage for crisper later stages.
+          ctx.fillRect(cell.x, cell.y, Math.ceil(w), Math.ceil(h));
+        }
       };
 
-      ctx.lineCap = "round";
+      let currentStage = 0;
+      let cellCursor = 0;
 
-      // Coarse-to-fine passes: large brushes first, then progressively smaller.
-      const passes = [
-        { brush: Math.max(10, Math.round(Math.max(width, height) / 18)), count: 0 },
-        { brush: Math.max(6, Math.round(Math.max(width, height) / 36)), count: 0 },
-        { brush: Math.max(3, Math.round(Math.max(width, height) / 72)), count: 0 },
-        { brush: Math.max(2, Math.round(Math.max(width, height) / 140)), count: 0 },
-      ];
-      // Strokes per pass scales with area and inverse brush size.
-      const area = width * height;
-      for (const pass of passes) {
-        pass.count = Math.round((area / (pass.brush * pass.brush)) * 1.4);
-      }
-      const totalStrokes = passes.reduce((sum, p) => sum + p.count, 0);
+      // Shuffle the paint order within a stage so it fills in organically
+      // rather than scanning top-to-bottom.
+      const order: number[][] = stages.map((cells) => {
+        const idx = cells.map((_, i) => i);
+        for (let i = idx.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [idx[i], idx[j]] = [idx[j], idx[i]];
+        }
+        return idx;
+      });
 
-      let passIndex = 0;
-      let drawnInPass = 0;
-      let drawnTotal = 0;
+      const updateProgress = () => {
+        if (currentStage >= stages.length) {
+          setProgress(1);
+          return;
+        }
+        const within = stages[currentStage].length
+          ? cellCursor / stages[currentStage].length
+          : 1;
+        setProgress(Math.min(0.999, (currentStage + within) / totalStages));
+      };
 
-      const drawStroke = (brush: number) => {
-        const x = Math.random() * width;
-        const y = Math.random() * height;
-        const angle = strokeAngleAt(x, y);
-        const length = brush * (1.5 + Math.random());
-        const width2 = brush * (0.6 + Math.random() * 0.5);
-
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.rotate(angle);
-        ctx.globalAlpha = 0.85;
-        ctx.strokeStyle = colorAt(x, y);
-        ctx.lineWidth = width2;
-        ctx.beginPath();
-        ctx.moveTo(-length / 2, 0);
-        ctx.lineTo(length / 2, 0);
-        ctx.stroke();
-        ctx.restore();
+      const runExactFinalPass = () => {
+        if (cancelled) return;
+        setStageIndex(stages.length); // final stage index
+        setStageLabel(STAGE_LABELS[STAGE_LABELS.length - 1]);
+        // Draw the true image on top → identical to the original.
+        ctx.drawImage(source, 0, 0, width, height);
+        setProgress(1);
+        setFinished(true);
+        onDone?.();
       };
 
       const step = () => {
         if (cancelled) return;
 
-        for (let n = 0; n < strokesPerFrame; n++) {
-          if (passIndex >= passes.length) break;
-          const pass = passes[passIndex];
-          drawStroke(pass.brush);
-          drawnInPass++;
-          drawnTotal++;
-          if (drawnInPass >= pass.count) {
-            passIndex++;
-            drawnInPass = 0;
-          }
+        if (currentStage >= stages.length) {
+          runExactFinalPass();
+          return;
         }
 
-        setProgress(Math.min(1, drawnTotal / totalStrokes));
+        const cells = stages[currentStage];
+        const sequence = order[currentStage];
 
-        if (passIndex < passes.length) {
-          rafRef.current = requestAnimationFrame(step);
+        let painted = 0;
+        while (cellCursor < sequence.length && painted < cellsPerFrame) {
+          paintCell(cells[sequence[cellCursor]], currentStage);
+          cellCursor++;
+          painted++;
+        }
+
+        updateProgress();
+
+        if (cellCursor >= sequence.length) {
+          // Stage complete: pause, then advance to the next stage.
+          currentStage++;
+          cellCursor = 0;
+          if (currentStage < stages.length) {
+            setStageIndex(currentStage);
+            setStageLabel(STAGE_LABELS[Math.min(currentStage, STAGE_LABELS.length - 1)]);
+          }
+          timeoutRef.current = setTimeout(() => {
+            if (cancelled) return;
+            rafRef.current = requestAnimationFrame(step);
+          }, stagePauseMs);
         } else {
-          rafRef.current = null;
-          onDone?.();
+          rafRef.current = requestAnimationFrame(step);
         }
       };
 
+      // Initialize UI state and kick off stage 0.
       setIsReady(true);
+      setFinished(false);
       setProgress(0);
+      setStageIndex(0);
+      setStageLabel(STAGE_LABELS[0]);
       rafRef.current = requestAnimationFrame(step);
     };
 
@@ -178,7 +251,7 @@ export default function PaintingCanvas({
     return () => {
       cancelled = true;
     };
-  }, [src, maxSize, strokesPerFrame, onDone]);
+  }, [src, maxSize, stagePauseMs, cellsPerFrame, onDone]);
 
   useEffect(() => {
     const cleanupImage = paint();
@@ -187,6 +260,10 @@ export default function PaintingCanvas({
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
+      }
+      if (timeoutRef.current !== null) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
       }
     };
     // replayKey is included so changing it re-runs the whole effect.
@@ -197,19 +274,33 @@ export default function PaintingCanvas({
       <div className="overflow-hidden rounded-xl shadow-lg ring-1 ring-black/5 dark:ring-white/10">
         <canvas ref={canvasRef} className="block max-w-full" />
       </div>
-      <div
-        className="h-1.5 w-full max-w-md overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(progress * 100)}
-        aria-label="Painting progress"
-      >
+
+      <div className="flex w-full max-w-md flex-col gap-1.5">
+        <div className="flex items-center justify-between text-sm">
+          <span className="font-medium text-zinc-700 dark:text-zinc-300">
+            {finished
+              ? "Finished"
+              : `Stage ${Math.min(stageIndex + 1, stageCount)} of ${stageCount}`}
+          </span>
+          <span className="text-zinc-500 dark:text-zinc-400">
+            {finished ? "Identical to original" : stageLabel}
+          </span>
+        </div>
         <div
-          className="h-full rounded-full bg-indigo-500 transition-[width] duration-150 ease-out"
-          style={{ width: `${Math.round(progress * 100)}%` }}
-        />
+          className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(progress * 100)}
+          aria-label="Painting progress"
+        >
+          <div
+            className="h-full rounded-full bg-indigo-500 transition-[width] duration-200 ease-out"
+            style={{ width: `${Math.round(progress * 100)}%` }}
+          />
+        </div>
       </div>
+
       {!isReady && (
         <p className="text-sm text-zinc-500 dark:text-zinc-400">Preparing canvas…</p>
       )}
