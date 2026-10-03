@@ -13,9 +13,7 @@ interface PaintingCanvasProps {
   onDone?: () => void;
   /** Pause between stages, in ms, so each stage reads as a distinct step. */
   stagePauseMs?: number;
-  /** How many strokes are being painted at once. Lower = calmer. */
-  maxActiveStrokes?: number;
-  /** How fast each brush travels, in canvas px per frame. */
+  /** How fast the brush travels, in canvas px per frame. */
   strokeSpeed?: number;
 }
 
@@ -36,6 +34,9 @@ interface Cell {
   y: number;
   w: number;
   h: number;
+  /** Cell center, used for stroke placement and nearest-neighbor ordering. */
+  cx: number;
+  cy: number;
   color: string;
 }
 
@@ -68,7 +69,6 @@ export default function PaintingCanvas({
   replayKey = 0,
   onDone,
   stagePauseMs = 550,
-  maxActiveStrokes = 10,
   strokeSpeed = 3,
 }: PaintingCanvasProps) {
   // Committed paint lives on the base canvas; moving brush tips are drawn on
@@ -177,11 +177,15 @@ export default function PaintingCanvas({
         for (let row = 0; row < rows; row++) {
           for (let col = 0; col < cols; col++) {
             const i = (row * cols + col) * 4;
+            const x = col * cellSize;
+            const y = row * cellSize;
             cells.push({
-              x: col * cellSize,
-              y: row * cellSize,
+              x,
+              y,
               w: cellSize,
               h: cellSize,
+              cx: x + cellSize / 2,
+              cy: y + cellSize / 2,
               color: `rgba(${data[i]}, ${data[i + 1]}, ${data[i + 2]}, ${
                 data[i + 3] / 255
               })`,
@@ -193,29 +197,105 @@ export default function PaintingCanvas({
 
       const stages: Cell[][] = gridStages.map(buildCells);
 
-      // Shuffle paint order within each stage so it fills in organically.
-      const order: number[][] = stages.map((cells) => {
-        const idx = cells.map((_, i) => i);
-        for (let i = idx.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [idx[i], idx[j]] = [idx[j], idx[i]];
+      /**
+       * A spatial index over one stage's cells. Lets us repeatedly pull the
+       * nearest not-yet-painted cell to a given point in roughly constant time
+       * by bucketing cells into a uniform grid and searching outward in rings.
+       */
+      class NearestCells {
+        private bucketSize: number;
+        private cols: number;
+        private rows: number;
+        private buckets: Cell[][];
+        public remaining: number;
+
+        constructor(cells: Cell[]) {
+          // Bucket roughly the size of a cell so each bucket holds a few cells.
+          this.bucketSize = Math.max(
+            8,
+            cells.length ? Math.round(Math.max(width, height) / 24) : 8,
+          );
+          this.cols = Math.max(1, Math.ceil(width / this.bucketSize));
+          this.rows = Math.max(1, Math.ceil(height / this.bucketSize));
+          this.buckets = Array.from({ length: this.cols * this.rows }, () => []);
+          for (const cell of cells) {
+            this.buckets[this.bucketIndex(cell.cx, cell.cy)].push(cell);
+          }
+          this.remaining = cells.length;
         }
-        return idx;
-      });
+
+        private bucketIndex(x: number, y: number): number {
+          const bx = Math.min(this.cols - 1, Math.max(0, Math.floor(x / this.bucketSize)));
+          const by = Math.min(this.rows - 1, Math.max(0, Math.floor(y / this.bucketSize)));
+          return by * this.cols + bx;
+        }
+
+        /** Remove and return the unpainted cell nearest to (px, py). */
+        take(px: number, py: number): Cell | null {
+          if (this.remaining <= 0) return null;
+          const bx = Math.min(this.cols - 1, Math.max(0, Math.floor(px / this.bucketSize)));
+          const by = Math.min(this.rows - 1, Math.max(0, Math.floor(py / this.bucketSize)));
+          const maxRing = Math.max(this.cols, this.rows);
+
+          let best: Cell | null = null;
+          let bestBucket = -1;
+          let bestPos = -1;
+          let bestDist = Infinity;
+
+          for (let ring = 0; ring <= maxRing; ring++) {
+            // Scan all buckets at Chebyshev distance `ring` from the center.
+            for (let gy = by - ring; gy <= by + ring; gy++) {
+              if (gy < 0 || gy >= this.rows) continue;
+              for (let gx = bx - ring; gx <= bx + ring; gx++) {
+                if (gx < 0 || gx >= this.cols) continue;
+                // Only the ring's perimeter is new on this iteration.
+                const onRing =
+                  gx === bx - ring || gx === bx + ring ||
+                  gy === by - ring || gy === by + ring;
+                if (!onRing) continue;
+
+                const bucket = this.buckets[gy * this.cols + gx];
+                for (let k = 0; k < bucket.length; k++) {
+                  const c = bucket[k];
+                  const dx = c.cx - px;
+                  const dy = c.cy - py;
+                  const dist = dx * dx + dy * dy;
+                  if (dist < bestDist) {
+                    bestDist = dist;
+                    best = c;
+                    bestBucket = gy * this.cols + gx;
+                    bestPos = k;
+                  }
+                }
+              }
+            }
+            // Once we have a candidate, one extra ring guarantees correctness
+            // (a closer cell could sit in an adjacent bucket just out of range).
+            if (best && ring > 0) break;
+          }
+
+          if (best) {
+            const bucket = this.buckets[bestBucket];
+            bucket.splice(bestPos, 1);
+            this.remaining--;
+          }
+          return best;
+        }
+      }
+
+      const indexes: NearestCells[] = stages.map((cells) => new NearestCells(cells));
 
       // Turn a cell into a stroke plan: focal start point near the cell center,
       // heading along the local contour, length/width scaled to the cell.
       const planStroke = (cell: Cell, stage: number): Stroke => {
-        const cx = cell.x + cell.w / 2;
-        const cy = cell.y + cell.h / 2;
         const jitter = cell.w * 0.25;
-        const x0 = cx + (Math.random() - 0.5) * jitter;
-        const y0 = cy + (Math.random() - 0.5) * jitter;
-        const angle = contourAngleAt(cx, cy);
+        const x0 = cell.cx + (Math.random() - 0.5) * jitter;
+        const y0 = cell.cy + (Math.random() - 0.5) * jitter;
+        const angle = contourAngleAt(cell.cx, cell.cy);
         // Longer, bolder strokes early; short, fine strokes late.
         const lengthFactor = stage <= 1 ? 2.2 : stage <= 3 ? 1.6 : 1.1;
         const length = Math.max(cell.w, cell.h) * lengthFactor;
-        const width = Math.max(1, (stage <= 2 ? cell.h * 0.9 : cell.h * 0.7));
+        const width = Math.max(1, stage <= 2 ? cell.h * 0.9 : cell.h * 0.7);
         return {
           color: cell.color,
           width,
@@ -235,24 +315,24 @@ export default function PaintingCanvas({
       };
 
       let currentStage = 0;
-      let cursor = 0; // index into order[currentStage]
-      const active: Stroke[] = [];
       let paused = false;
+
+      // Only one stroke is painted at a time. We remember where the last one
+      // ended so the next stroke starts from the nearest remaining cell.
+      let current: Stroke | null = null;
+      let lastX = width / 2;
+      let lastY = height / 2;
 
       const totalCells = stages.reduce((sum, s) => sum + s.length, 0);
       let completedCells = 0;
 
-      const spawnIfNeeded = () => {
-        while (
-          !paused &&
-          active.length < maxActiveStrokes &&
-          currentStage < stages.length &&
-          cursor < order[currentStage].length
-        ) {
-          const cell = stages[currentStage][order[currentStage][cursor]];
-          cursor++;
-          active.push(planStroke(cell, currentStage));
-        }
+      // Pick the next stroke: the unpainted cell nearest the previous endpoint.
+      const beginNextStroke = (): boolean => {
+        if (currentStage >= stages.length) return false;
+        const cell = indexes[currentStage].take(lastX, lastY);
+        if (!cell) return false;
+        current = planStroke(cell, currentStage);
+        return true;
       };
 
       // Commit one path segment of a stroke onto the base canvas.
@@ -289,7 +369,7 @@ export default function PaintingCanvas({
 
       const advanceStage = () => {
         currentStage++;
-        cursor = 0;
+        current = null;
         if (currentStage < stages.length) {
           setStageIndex(currentStage);
           setStageLabel(
@@ -326,37 +406,35 @@ export default function PaintingCanvas({
 
         if (paused) return; // waiting between stages; timeout will resume
 
-        spawnIfNeeded();
+        // Make sure we have a stroke to work on; otherwise this stage is done.
+        if (!current && !beginNextStroke()) {
+          advanceStage();
+          rafRef.current = requestAnimationFrame(step);
+          return;
+        }
 
-        // Advance every active stroke by strokeSpeed px, committing the newly
-        // traversed segment to the base canvas.
+        // Advance the single current stroke by strokeSpeed px, committing the
+        // newly traversed segment, and show the moving brush tip.
         tipCtx.clearRect(0, 0, width, height);
-        for (let i = active.length - 1; i >= 0; i--) {
-          const s = active[i];
-          const from = s.drawn;
-          const to = Math.min(s.length, s.drawn + strokeSpeed);
-          commitSegment(s, from, to);
-          s.drawn = to;
+        const s = current!;
+        const from = s.drawn;
+        const to = Math.min(s.length, s.drawn + strokeSpeed);
+        commitSegment(s, from, to);
+        s.drawn = to;
 
-          if (s.drawn >= s.length) {
-            active.splice(i, 1); // stroke landed
-            completedCells++;
-          } else {
-            drawTip(s); // still travelling: show the brush head
-          }
+        if (s.drawn >= s.length) {
+          // Stroke landed: record its endpoint, retire it, pick the next one.
+          const [ex, ey] = pointAt(s, s.length);
+          lastX = ex;
+          lastY = ey;
+          current = null;
+          completedCells++;
+        } else {
+          drawTip(s);
         }
 
         updateProgress();
-
-        const stageDrained =
-          cursor >= order[currentStage].length && active.length === 0;
-
-        if (stageDrained) {
-          advanceStage();
-          rafRef.current = requestAnimationFrame(step);
-        } else {
-          rafRef.current = requestAnimationFrame(step);
-        }
+        rafRef.current = requestAnimationFrame(step);
       };
 
       setIsReady(true);
@@ -376,7 +454,7 @@ export default function PaintingCanvas({
     return () => {
       cancelled = true;
     };
-  }, [src, maxSize, stagePauseMs, maxActiveStrokes, strokeSpeed]);
+  }, [src, maxSize, stagePauseMs, strokeSpeed]);
 
   useEffect(() => {
     const cleanupImage = paint();
