@@ -428,15 +428,27 @@ export default function PaintingCanvas({
       let lastY = height / 2;
 
       const totalCells = stages.reduce((sum, s) => sum + s.length, 0);
-      let completedCells = 0;
+      // Count every cell we consume (painted or skipped) so the progress bar
+      // reflects how far through the stages we are, not just painted strokes.
+      let consumedCells = 0;
 
-      // Pick the next stroke: take the unpainted cell nearest the previous
-      // endpoint, simulate several candidate strokes there, and keep the one
-      // that best matches the target image.
-      const beginNextStroke = (): boolean => {
-        if (currentStage >= stages.length) return false;
+      // Outcome of trying to start the next stroke.
+      const enum NextResult {
+        Started, // a worthwhile stroke was chosen and is now `current`
+        Skipped, // a cell was consumed, but no candidate improved the image
+        StageDone, // no cells remain in this stage
+      }
+
+      // Try to start the next stroke: take the unpainted cell nearest the
+      // previous endpoint, simulate several candidates, and keep the best.
+      // If even the best candidate would move the canvas *away* from the
+      // target (non-positive improvement), skip it rather than paint — a wrong
+      // stroke is worse than no stroke.
+      const beginNextStroke = (): NextResult => {
+        if (currentStage >= stages.length) return NextResult.StageDone;
         const cell = indexes[currentStage].take(lastX, lastY);
-        if (!cell) return false;
+        if (!cell) return NextResult.StageDone;
+        consumedCells++;
 
         let best: Stroke | null = null;
         let bestScore = -Infinity;
@@ -450,8 +462,19 @@ export default function PaintingCanvas({
           }
         }
 
-        current = best;
-        return current !== null;
+        // Only paint if the best candidate actually improves the match.
+        if (best && bestScore > 0) {
+          current = best;
+          // Advance the "last endpoint" toward this cell so skipped cells still
+          // nudge the brush along, keeping the walk spatially coherent.
+          lastX = cell.cx;
+          lastY = cell.cy;
+          return NextResult.Started;
+        }
+
+        lastX = cell.cx;
+        lastY = cell.cy;
+        return NextResult.Skipped;
       };
 
       // Commit one path segment of a stroke onto the base canvas, and mirror
@@ -471,7 +494,7 @@ export default function PaintingCanvas({
       };
 
       const updateProgress = () => {
-        setProgress(Math.min(0.999, completedCells / (totalCells + 1)));
+        setProgress(Math.min(0.999, consumedCells / (totalCells + 1)));
       };
 
       const advanceStage = () => {
@@ -512,11 +535,32 @@ export default function PaintingCanvas({
 
         if (paused) return; // waiting between stages; timeout will resume
 
-        // Make sure we have a stroke to work on; otherwise this stage is done.
-        if (!current && !beginNextStroke()) {
-          advanceStage();
-          rafRef.current = requestAnimationFrame(step);
-          return;
+        // Make sure we have a stroke to work on. Skipped cells (where no
+        // candidate would improve the image) don't paint anything, so keep
+        // pulling cells until one is worth painting or the stage is drained.
+        // Cap the skips per frame so a mostly-correct stage can't block it.
+        if (!current) {
+          const maxSkipsPerFrame = 256;
+          let skips = 0;
+          let result = beginNextStroke();
+          while (result === NextResult.Skipped && skips < maxSkipsPerFrame) {
+            skips++;
+            result = beginNextStroke();
+          }
+
+          if (result === NextResult.StageDone) {
+            advanceStage();
+            rafRef.current = requestAnimationFrame(step);
+            return;
+          }
+          if (result === NextResult.Skipped) {
+            // Hit the per-frame skip cap without finding a paintable stroke;
+            // update progress and resume next frame.
+            updateProgress();
+            rafRef.current = requestAnimationFrame(step);
+            return;
+          }
+          // Otherwise a stroke was started; fall through to paint it.
         }
 
         // Advance the single current stroke by strokeSpeed px, committing the
@@ -528,12 +572,11 @@ export default function PaintingCanvas({
         s.drawn = to;
 
         if (s.drawn >= s.length) {
-          // Stroke landed: record its endpoint, retire it, pick the next one.
+          // Stroke landed: record its endpoint and retire it.
           const [ex, ey] = pointAt(s, s.length);
           lastX = ex;
           lastY = ey;
           current = null;
-          completedCells++;
         }
 
         updateProgress();
