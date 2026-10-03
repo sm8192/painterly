@@ -5,7 +5,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export interface SelectedImage {
   /** The original file the user chose. */
   file: File;
-  /** An object URL for previewing the image. Revoke when no longer needed. */
+}
+
+/** Internal preview state: the file plus a locally-owned preview URL. */
+interface Preview {
+  file: File;
   url: string;
 }
 
@@ -17,12 +21,13 @@ interface ImageUploaderProps {
 const ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 export default function ImageUploader({ onImageSelected }: ImageUploaderProps) {
-  const [selected, setSelected] = useState<SelectedImage | null>(null);
+  const [selected, setSelected] = useState<Preview | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Clean up the object URL when the selection changes or the component unmounts.
+  // The preview URL is owned solely by this component (never handed to the
+  // parent), so it's safe to revoke on change/unmount.
   useEffect(() => {
     return () => {
       if (selected) {
@@ -50,10 +55,10 @@ export default function ImageUploader({ onImageSelected }: ImageUploaderProps) {
         if (previous) {
           URL.revokeObjectURL(previous.url);
         }
-        const next: SelectedImage = { file, url: URL.createObjectURL(file) };
-        onImageSelected?.(next);
-        return next;
+        return { file, url: URL.createObjectURL(file) };
       });
+      // Hand the raw file to the parent; consumers derive their own URLs.
+      onImageSelected?.({ file });
     },
     [onImageSelected],
   );

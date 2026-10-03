@@ -1,4 +1,4 @@
-import ImageUploader from "./components/ImageUploader";
+import PainterlyApp from "./components/PainterlyApp";
 
 export default function Home() {
   return (
@@ -13,7 +13,7 @@ export default function Home() {
           </p>
         </header>
 
-        <ImageUploader />
+        <PainterlyApp />
       </main>
     </div>
   );
