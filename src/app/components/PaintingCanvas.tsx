@@ -78,6 +78,14 @@ export default function PaintingCanvas({
   const rafRef = useRef<number | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Keep the latest onDone in a ref so it is NOT a dependency of the paint
+  // effect. Otherwise an inline onDone from the parent changes identity when
+  // onDone fires, which would restart the whole animation one extra time.
+  const onDoneRef = useRef(onDone);
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  }, [onDone]);
+
   const [progress, setProgress] = useState(0);
   const [isReady, setIsReady] = useState(false);
   const [stageIndex, setStageIndex] = useState(0);
@@ -304,7 +312,7 @@ export default function PaintingCanvas({
         ctx.drawImage(source, 0, 0, width, height); // identical to original
         setProgress(1);
         setFinished(true);
-        onDone?.();
+        onDoneRef.current?.();
       };
 
       const step = () => {
@@ -368,7 +376,7 @@ export default function PaintingCanvas({
     return () => {
       cancelled = true;
     };
-  }, [src, maxSize, stagePauseMs, maxActiveStrokes, strokeSpeed, onDone]);
+  }, [src, maxSize, stagePauseMs, maxActiveStrokes, strokeSpeed]);
 
   useEffect(() => {
     const cleanupImage = paint();

@@ -35,6 +35,8 @@ export default function PainterlyApp() {
     setDone(false);
   }, []);
 
+  const handleDone = useCallback(() => setDone(true), []);
+
   if (!file || !url) {
     return <ImageUploader onImageSelected={handleSelected} />;
   }
@@ -44,7 +46,7 @@ export default function PainterlyApp() {
       <PaintingCanvas
         src={url}
         replayKey={replayKey}
-        onDone={() => setDone(true)}
+        onDone={handleDone}
       />
 
       <div className="flex flex-wrap items-center justify-center gap-3">
