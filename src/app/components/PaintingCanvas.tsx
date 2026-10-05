@@ -381,7 +381,7 @@ export default function PaintingCanvas({
         // of brush size, so the whole stroke is evaluated — not just a couple
         // of points. (Tying the step to brush width previously under-sampled
         // large coarse strokes, making early scores little better than noise.)
-        const SAMPLE_SPACING = 3; // px between samples, along and across
+        const SAMPLE_SPACING = 1; // px between samples, along and across
         const lengthSteps = Math.max(1, Math.round(s.length / SAMPLE_SPACING));
         const halfW = s.width / 2;
         const widthSteps = Math.max(1, Math.round(s.width / SAMPLE_SPACING));
@@ -466,7 +466,7 @@ export default function PaintingCanvas({
       // Brush-shrink tracking.
       // (A) shrink once the difference falls to 2/3 of its value at the last
       //     shrink; (B) shrink after this many consecutive non-improving moves.
-      const SHRINK_DIFFERENCE_RATIO = 1 / 4;
+      const SHRINK_DIFFERENCE_RATIO = 1 / 2;
       const SHRINK_NEGATIVE_STREAK = 20;
       let differenceAtLastShrink = currentDifference;
       let consecutiveNegative = 0;
