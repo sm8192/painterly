@@ -150,6 +150,25 @@ export default function PaintingCanvas({
       const currentG = new Uint8ClampedArray(width * height).fill(255);
       const currentB = new Uint8ClampedArray(width * height).fill(255);
 
+      // Squared-error helper between a pixel's target color and an rgb triple.
+      const pixelError = (idx: number, r: number, g: number, b: number) => {
+        const ti = idx * 4;
+        const dr = r - pixels[ti];
+        const dg = g - pixels[ti + 1];
+        const db = b - pixels[ti + 2];
+        return dr * dr + dg * dg + db * db;
+      };
+
+      // Total difference between the blank (white) canvas and the target. The
+      // progress bar reports how far the painting has closed this gap:
+      //   progress = 1 - currentDifference / originalDifference
+      let originalDifference = 0;
+      for (let idx = 0; idx < width * height; idx++) {
+        originalDifference += pixelError(idx, 255, 255, 255);
+      }
+      // Running total, updated incrementally as pixels are painted.
+      let currentDifference = originalDifference;
+
       const pixelIndex = (x: number, y: number): number => {
         const cx = Math.min(width - 1, Math.max(0, Math.floor(x)));
         const cy = Math.min(height - 1, Math.max(0, Math.floor(y)));
@@ -170,7 +189,10 @@ export default function PaintingCanvas({
         return Math.atan2(gy, gx) + Math.PI / 2; // run along the edge
       };
 
-      // Grid resolution per stage, coarse → fine. Final exact pass has no grid.
+      // Brush-size levels (grid resolution), coarse → fine. The brush shrinks
+      // to the next level only when a difference/stall condition is met (see
+      // the step loop), not after a fixed number of strokes. A final exact
+      // pass follows the finest level.
       const gridStages = [6, 12, 24, 48, 96, 180];
       const totalStages = gridStages.length + 1;
       setStageCount(totalStages);
@@ -307,7 +329,9 @@ export default function PaintingCanvas({
         }
       }
 
-      const indexes: NearestCells[] = stages.map((cells) => new NearestCells(cells));
+      // The active cell supply for the current brush level. Rebuilt when a
+      // level is (re)entered or exhausted without shrinking.
+      let activeIndex = new NearestCells(stages[0]);
 
       // Generate one *candidate* stroke for a cell. Candidates share the cell's
       // color and focal area but vary in start jitter, heading, length,
@@ -420,6 +444,11 @@ export default function PaintingCanvas({
             const sy = py + oy * off;
             if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
             const idx = pixelIndex(sx, sy);
+            // Keep the running difference in sync: swap this pixel's old error
+            // for its new error after painting the stroke color here.
+            const errBefore = pixelError(idx, currentR[idx], currentG[idx], currentB[idx]);
+            const errAfter = pixelError(idx, s.r, s.g, s.b);
+            currentDifference += errAfter - errBefore;
             currentR[idx] = s.r;
             currentG[idx] = s.g;
             currentB[idx] = s.b;
@@ -436,16 +465,19 @@ export default function PaintingCanvas({
       let lastX = width / 2;
       let lastY = height / 2;
 
-      const totalCells = stages.reduce((sum, s) => sum + s.length, 0);
-      // Count every cell we consume (painted or skipped) so the progress bar
-      // reflects how far through the stages we are, not just painted strokes.
-      let consumedCells = 0;
+      // Brush-shrink tracking.
+      // (A) shrink once the difference falls to 2/3 of its value at the last
+      //     shrink; (B) shrink after this many consecutive non-improving moves.
+      const SHRINK_DIFFERENCE_RATIO = 2 / 3;
+      const SHRINK_NEGATIVE_STREAK = 20;
+      let differenceAtLastShrink = currentDifference;
+      let consecutiveNegative = 0;
 
       // Outcome of trying to start the next stroke.
       const enum NextResult {
         Started, // a worthwhile stroke was chosen and is now `current`
         Skipped, // a cell was consumed, but no candidate improved the image
-        StageDone, // no cells remain in this stage
+        Empty, // the current level's cell supply is exhausted
       }
 
       // Try to start the next stroke: take the unpainted cell nearest the
@@ -454,10 +486,9 @@ export default function PaintingCanvas({
       // target (non-positive improvement), skip it rather than paint — a wrong
       // stroke is worse than no stroke.
       const beginNextStroke = (): NextResult => {
-        if (currentStage >= stages.length) return NextResult.StageDone;
-        const cell = indexes[currentStage].take(lastX, lastY);
-        if (!cell) return NextResult.StageDone;
-        consumedCells++;
+        if (currentStage >= stages.length) return NextResult.Empty;
+        const cell = activeIndex.take(lastX, lastY);
+        if (!cell) return NextResult.Empty;
 
         let best: Stroke | null = null;
         let bestScore = -Infinity;
@@ -471,18 +502,17 @@ export default function PaintingCanvas({
           }
         }
 
+        lastX = cell.cx;
+        lastY = cell.cy;
+
         // Only paint if the best candidate actually improves the match.
         if (best && bestScore > 0) {
           current = best;
-          // Advance the "last endpoint" toward this cell so skipped cells still
-          // nudge the brush along, keeping the walk spatially coherent.
-          lastX = cell.cx;
-          lastY = cell.cy;
+          consecutiveNegative = 0; // (B) reset: this move improved the image
           return NextResult.Started;
         }
 
-        lastX = cell.cx;
-        lastY = cell.cy;
+        consecutiveNegative++; // (B) count a non-improving move
         return NextResult.Skipped;
       };
 
@@ -503,13 +533,22 @@ export default function PaintingCanvas({
       };
 
       const updateProgress = () => {
-        setProgress(Math.min(0.999, consumedCells / (totalCells + 1)));
+        // Fraction of the original canvas-to-target difference we've closed.
+        const closed =
+          originalDifference > 0 ? 1 - currentDifference / originalDifference : 1;
+        setProgress(Math.min(0.999, Math.max(0, closed)));
       };
 
-      const advanceStage = () => {
+      // Shrink the brush to the next finer level. Resets the shrink trackers,
+      // rebuilds the cell supply for the new level, and pauses briefly so the
+      // size change reads as a distinct step.
+      const shrinkBrush = () => {
         currentStage++;
         current = null;
+        consecutiveNegative = 0;
+        differenceAtLastShrink = currentDifference;
         if (currentStage < stages.length) {
+          activeIndex = new NearestCells(stages[currentStage]);
           setStageIndex(currentStage);
           setStageLabel(
             STAGE_LABELS[Math.min(currentStage, STAGE_LABELS.length - 1)],
@@ -522,6 +561,11 @@ export default function PaintingCanvas({
           rafRef.current = requestAnimationFrame(step);
         }, stagePauseMs);
       };
+
+      // Whether either shrink condition is currently satisfied.
+      const shouldShrink = (): boolean =>
+        currentDifference <= SHRINK_DIFFERENCE_RATIO * differenceAtLastShrink ||
+        consecutiveNegative >= SHRINK_NEGATIVE_STREAK;
 
       const runExactFinalPass = () => {
         if (cancelled) return;
@@ -536,35 +580,56 @@ export default function PaintingCanvas({
       const step = () => {
         if (cancelled) return;
 
-        // Finished all painterly stages → exact final pass.
+        // Finished all brush levels → exact final pass.
         if (currentStage >= stages.length) {
           runExactFinalPass();
           return;
         }
 
-        if (paused) return; // waiting between stages; timeout will resume
+        if (paused) return; // waiting between levels; timeout will resume
 
-        // Make sure we have a stroke to work on. Skipped cells (where no
-        // candidate would improve the image) don't paint anything, so keep
-        // pulling cells until one is worth painting or the stage is drained.
-        // Cap the skips per frame so a mostly-correct stage can't block it.
+        // If we're between strokes and a shrink condition is met, shrink now.
+        if (!current && shouldShrink()) {
+          shrinkBrush();
+          rafRef.current = requestAnimationFrame(step);
+          return;
+        }
+
+        // Make sure we have a stroke to work on. Non-improving moves ("skips")
+        // don't paint anything, so keep pulling cells until one is worth
+        // painting, a shrink condition fires, or the supply empties. Cap the
+        // skips per frame so a mostly-correct level can't block the frame.
         if (!current) {
           const maxSkipsPerFrame = 256;
           let skips = 0;
           let result = beginNextStroke();
-          while (result === NextResult.Skipped && skips < maxSkipsPerFrame) {
+          while (
+            result === NextResult.Skipped &&
+            skips < maxSkipsPerFrame &&
+            !shouldShrink()
+          ) {
             skips++;
             result = beginNextStroke();
           }
 
-          if (result === NextResult.StageDone) {
-            advanceStage();
+          // (B) a long non-improving streak triggers a shrink.
+          if (shouldShrink()) {
+            shrinkBrush();
+            rafRef.current = requestAnimationFrame(step);
+            return;
+          }
+
+          if (result === NextResult.Empty) {
+            // Supply exhausted at this size without a shrink condition yet.
+            // Refill the level's cells and keep painting at the same brush
+            // size; the shrink conditions will eventually advance the level.
+            activeIndex = new NearestCells(stages[currentStage]);
+            updateProgress();
             rafRef.current = requestAnimationFrame(step);
             return;
           }
           if (result === NextResult.Skipped) {
-            // Hit the per-frame skip cap without finding a paintable stroke;
-            // update progress and resume next frame.
+            // Hit the per-frame skip cap without finding a paintable stroke.
             updateProgress();
             rafRef.current = requestAnimationFrame(step);
             return;
