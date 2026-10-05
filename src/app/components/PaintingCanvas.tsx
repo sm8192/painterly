@@ -112,8 +112,13 @@ export default function PaintingCanvas({
 
       base.width = Math.round(width * dpr);
       base.height = Math.round(height * dpr);
+      // Let the element scale responsively while keeping the image's true
+      // proportions: cap the width at its natural size, let height follow via
+      // the intrinsic aspect ratio. On narrow screens `max-w-full` (CSS) shrinks
+      // the width and height scales with it, so it never squishes or distorts.
       base.style.width = `${width}px`;
-      base.style.height = `${height}px`;
+      base.style.height = "auto";
+      base.style.aspectRatio = `${width} / ${height}`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
@@ -707,7 +712,7 @@ export default function PaintingCanvas({
   return (
     <div className="flex w-full flex-col items-center gap-3">
       <div className="overflow-hidden rounded-xl shadow-lg ring-1 ring-black/5 dark:ring-white/10">
-        <canvas ref={baseRef} className="block max-w-full" />
+        <canvas ref={baseRef} className="block h-auto max-w-full" />
       </div>
 
       <div className="flex w-full max-w-md flex-col gap-1.5">
