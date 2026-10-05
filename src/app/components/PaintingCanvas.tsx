@@ -492,25 +492,15 @@ export default function PaintingCanvas({
         lastX = cell.cx;
         lastY = cell.cy;
 
-        // Only paint if the best candidate improves the match by more than a
-        // safety margin. The scorer models strokes as flat color, but the
-        // canvas renders anti-aliased edges, so the true result can differ
-        // slightly along the stroke's perimeter. Requiring the predicted gain
-        // to exceed roughly that perimeter's worst-case error means a committed
-        // stroke virtually never regresses the real difference.
-        if (best) {
-          // Margin ≈ (edge-pixel count) × (typical AA edge error per pixel).
-          // AA only touches a ~1px border, so the uncertain pixel count scales
-          // with the perimeter; each such pixel is a partial blend, so its
-          // error is a fraction of full scale, not the 255/255² worst case.
-          const perimeter = 2 * (best.length + best.width);
-          const edgeErr = useSquared ? 40 * 40 : 40; // ~partial blend per channel-ish
-          const margin = perimeter * edgeErr;
-          if (bestScore > margin) {
-            current = best;
-            consecutiveNegative = 0; // (B) reset: this move improved the image
-            return NextResult.Started;
-          }
+        // Only paint if the best candidate actually improves the match. The
+        // running difference is reconciled from the real rendered pixels after
+        // every segment (see reconcileRegion), so the scorer's "before" state
+        // is truthful and a positive predicted gain reliably means a real
+        // improvement — no size-scaled margin needed.
+        if (best && bestScore > 0) {
+          current = best;
+          consecutiveNegative = 0; // (B) reset: this move improved the image
+          return NextResult.Started;
         }
 
         consecutiveNegative++; // (B) count a non-improving move
