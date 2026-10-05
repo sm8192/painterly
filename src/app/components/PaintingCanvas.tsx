@@ -18,6 +18,13 @@ interface PaintingCanvasProps {
    * reduces the difference from the target image is the one that gets painted.
    */
   candidatesPerStroke?: number;
+  /**
+   * How per-pixel color error is measured everywhere (stroke scoring, the
+   * running difference total, progress, and the debug check):
+   * - "squared": Euclidean, dr² + dg² + db² — penalizes big mismatches harder.
+   * - "absolute": Manhattan, |dr| + |dg| + |db| — more outlier-tolerant.
+   */
+  errorMetric?: "squared" | "absolute";
 }
 
 /** Human-readable label for each brush-size level, coarse → fine. */
@@ -80,6 +87,7 @@ export default function PaintingCanvas({
   stagePauseMs = 550,
   strokeSpeed = 12,
   candidatesPerStroke = 1000,
+  errorMetric = "squared",
 }: PaintingCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -143,13 +151,23 @@ export default function PaintingCanvas({
       const currentG = new Uint8ClampedArray(width * height).fill(255);
       const currentB = new Uint8ClampedArray(width * height).fill(255);
 
-      // Squared-error helper between a pixel's target color and an rgb triple.
+      // Per-channel error contribution, selected once by the metric toggle.
+      // "squared" → Euclidean (penalizes big mismatches harder); "absolute" →
+      // Manhattan (more outlier-tolerant). Every difference calculation below
+      // routes through this so the scorer, running total, progress, and debug
+      // check always agree.
+      const useSquared = errorMetric === "squared";
+      const channelError = (delta: number): number =>
+        useSquared ? delta * delta : Math.abs(delta);
+
+      // Error between a pixel's target color and an rgb triple.
       const pixelError = (idx: number, r: number, g: number, b: number) => {
         const ti = idx * 4;
-        const dr = r - pixels[ti];
-        const dg = g - pixels[ti + 1];
-        const db = b - pixels[ti + 2];
-        return dr * dr + dg * dg + db * db;
+        return (
+          channelError(r - pixels[ti]) +
+          channelError(g - pixels[ti + 1]) +
+          channelError(b - pixels[ti + 2])
+        );
       };
 
       // Total difference between the blank (white) canvas and the target. The
@@ -408,16 +426,16 @@ export default function PaintingCanvas({
             const tb = pixels[ti + 2];
 
             // Error of the current canvas vs the target at this pixel.
-            const dcr = currentR[idx] - tr;
-            const dcg = currentG[idx] - tg;
-            const dcb = currentB[idx] - tb;
-            const errBefore = dcr * dcr + dcg * dcg + dcb * dcb;
+            const errBefore =
+              channelError(currentR[idx] - tr) +
+              channelError(currentG[idx] - tg) +
+              channelError(currentB[idx] - tb);
 
             // Error if we painted the stroke color here instead.
-            const dsr = s.r - tr;
-            const dsg = s.g - tg;
-            const dsb = s.b - tb;
-            const errAfter = dsr * dsr + dsg * dsg + dsb * dsb;
+            const errAfter =
+              channelError(s.r - tr) +
+              channelError(s.g - tg) +
+              channelError(s.b - tb);
 
             improvement += errBefore - errAfter;
           }
@@ -535,6 +553,37 @@ export default function PaintingCanvas({
         const closed =
           originalDifference > 0 ? 1 - currentDifference / originalDifference : 1;
         setProgress(Math.min(0.999, Math.max(0, closed)));
+      };
+
+      // ---- DEBUG: verify each stroke actually reduces the total difference ----
+      // When enabled, we read the ENTIRE rendered canvas (not the in-memory
+      // mirror) and sum the squared color difference from the target. Comparing
+      // this before vs. after a stroke independently validates both the scorer
+      // and the mirror against the real pixels. This is deliberately expensive
+      // (full-canvas getImageData per stroke), so it's off unless DEBUG_* is set.
+      const DEBUG_VERIFY_STROKES = true;
+      // Captured before a stroke's first segment; compared after it lands.
+      let debugDiffBeforeStroke = 0;
+      let debugStrokeCounter = 0;
+
+      const measureRenderedDifference = (): number => {
+        const data = ctx.getImageData(0, 0, base.width, base.height).data;
+        // The canvas buffer is width*dpr × height*dpr; sample on the logical
+        // grid so indices line up with the target `pixels` (width × height).
+        let total = 0;
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            const sx = Math.min(base.width - 1, Math.round(x * dpr));
+            const sy = Math.min(base.height - 1, Math.round(y * dpr));
+            const ci = (sy * base.width + sx) * 4;
+            const ti = (y * width + x) * 4;
+            total +=
+              channelError(data[ci] - pixels[ti]) +
+              channelError(data[ci + 1] - pixels[ti + 1]) +
+              channelError(data[ci + 2] - pixels[ti + 2]);
+          }
+        }
+        return total;
       };
 
       // Shrink the brush to the next finer level. Resets the shrink trackers,
@@ -659,6 +708,12 @@ export default function PaintingCanvas({
         const s = current!;
         const from = s.drawn;
         const to = Math.min(s.length, s.drawn + strokeSpeed);
+
+        // DEBUG: snapshot the true rendered difference at the start of a stroke.
+        if (DEBUG_VERIFY_STROKES && from === 0) {
+          debugDiffBeforeStroke = measureRenderedDifference();
+        }
+
         commitSegment(s, from, to);
         s.drawn = to;
 
@@ -668,6 +723,20 @@ export default function PaintingCanvas({
           lastX = ex;
           lastY = ey;
           current = null;
+
+          // DEBUG: a stroke should never increase the total difference.
+          if (DEBUG_VERIFY_STROKES) {
+            const after = measureRenderedDifference();
+            debugStrokeCounter++;
+            if (after > debugDiffBeforeStroke) {
+              console.warn(
+                `[painterly] stroke #${debugStrokeCounter} INCREASED difference ` +
+                  `by ${(after - debugDiffBeforeStroke).toLocaleString()} ` +
+                  `(before ${debugDiffBeforeStroke.toLocaleString()} → after ${after.toLocaleString()}) ` +
+                  `at brush level ${currentStage + 1}`,
+              );
+            }
+          }
         }
 
         updateProgress();
@@ -691,7 +760,7 @@ export default function PaintingCanvas({
     return () => {
       cancelled = true;
     };
-  }, [src, maxSize, stagePauseMs, strokeSpeed, candidatesPerStroke]);
+  }, [src, maxSize, stagePauseMs, strokeSpeed, candidatesPerStroke, errorMetric]);
 
   useEffect(() => {
     const cleanupImage = paint();

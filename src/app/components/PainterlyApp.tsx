@@ -16,6 +16,16 @@ export default function PainterlyApp() {
   const [candidatesDraft, setCandidatesDraft] = useState(1000);
   const [candidates, setCandidates] = useState(1000);
 
+  // How per-pixel color error is measured. Switching restarts the painting.
+  const [errorMetric, setErrorMetric] = useState<"squared" | "absolute">(
+    "squared",
+  );
+
+  const chooseMetric = useCallback((metric: "squared" | "absolute") => {
+    setErrorMetric(metric);
+    setReplayKey((k) => k + 1);
+  }, []);
+
   const commitSpeed = useCallback(() => {
     setSpeed(speedDraft);
     setReplayKey((k) => k + 1);
@@ -60,6 +70,7 @@ export default function PainterlyApp() {
         replayKey={replayKey}
         strokeSpeed={speed}
         candidatesPerStroke={candidates}
+        errorMetric={errorMetric}
       />
 
       <div className="grid w-full max-w-md grid-cols-1 gap-4 sm:grid-cols-2">
@@ -104,6 +115,43 @@ export default function PainterlyApp() {
             aria-label="Number of candidate strokes simulated per move"
           />
         </label>
+      </div>
+
+      <div className="flex w-full max-w-md flex-col gap-1.5 text-sm">
+        <span className="font-medium text-zinc-700 dark:text-zinc-300">
+          Color difference metric
+        </span>
+        <div
+          role="radiogroup"
+          aria-label="Color difference metric"
+          className="inline-flex rounded-full border border-zinc-300 p-0.5 dark:border-zinc-700"
+        >
+          {(
+            [
+              ["squared", "Squared"],
+              ["absolute", "Absolute"],
+            ] as const
+          ).map(([value, label]) => {
+            const active = errorMetric === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => chooseMetric(value)}
+                className={[
+                  "flex-1 rounded-full px-4 py-1.5 font-medium transition-colors",
+                  active
+                    ? "bg-indigo-600 text-white"
+                    : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800",
+                ].join(" ")}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center justify-center gap-3">
