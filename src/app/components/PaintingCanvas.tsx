@@ -465,7 +465,7 @@ export default function PaintingCanvas({
       // Brush-shrink tracking.
       // (A) shrink once the difference falls to 2/3 of its value at the last
       //     shrink; (B) shrink after this many consecutive non-improving moves.
-      const SHRINK_DIFFERENCE_RATIO = 1 / 2;
+      const SHRINK_DIFFERENCE_RATIO = 4 / 5;
       const SHRINK_NEGATIVE_STREAK = 20;
       let differenceAtLastShrink = currentDifference;
       let consecutiveNegative = 0;
