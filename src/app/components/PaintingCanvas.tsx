@@ -9,9 +9,7 @@ interface PaintingCanvasProps {
   maxSize?: number;
   /** Signal used to restart the animation. Changing it replays from scratch. */
   replayKey?: number;
-  /** Called when the painting finishes. */
-  onDone?: () => void;
-  /** Pause between stages, in ms, so each stage reads as a distinct step. */
+  /** Pause between brush-size changes, in ms, so each reads as a distinct step. */
   stagePauseMs?: number;
   /** How fast the brush travels, in canvas px per frame. */
   strokeSpeed?: number;
@@ -22,7 +20,7 @@ interface PaintingCanvasProps {
   candidatesPerStroke?: number;
 }
 
-/** Human-readable label for each stage, coarse → fine. */
+/** Human-readable label for each brush-size level, coarse → fine. */
 const STAGE_LABELS = [
   "Blocking in base shapes",
   "Massing in color",
@@ -30,7 +28,6 @@ const STAGE_LABELS = [
   "Building midtones",
   "Adding detail",
   "Refining fine detail",
-  "Final pass",
 ];
 
 /** A cell's sampled color and footprint on the canvas. */
@@ -70,17 +67,16 @@ interface Stroke {
 }
 
 /**
- * Staged "painting" renderer. Starts from a blank canvas and works through
- * discrete coarse-to-fine stages. Within each stage, cells are painted as
- * animated brush strokes that start at a focal point and travel along a
- * curved path, following image contours. The final stage draws the real
- * image at full resolution, so the result is pixel-identical to the original.
+ * Progressive "painting" renderer. Starts from a blank canvas and refines it
+ * with animated brush strokes that start at a focal point and travel along a
+ * curved path, following image contours. The brush shrinks through coarse-to-
+ * fine size levels as the match improves, then keeps refining indefinitely at
+ * the finest level.
  */
 export default function PaintingCanvas({
   src,
   maxSize = 640,
   replayKey = 0,
-  onDone,
   stagePauseMs = 550,
   strokeSpeed = 3,
   candidatesPerStroke = 20,
@@ -88,14 +84,6 @@ export default function PaintingCanvas({
   const baseRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Keep the latest onDone in a ref so it is NOT a dependency of the paint
-  // effect. Otherwise an inline onDone from the parent changes identity when
-  // onDone fires, which would restart the whole animation one extra time.
-  const onDoneRef = useRef(onDone);
-  useEffect(() => {
-    onDoneRef.current = onDone;
-  }, [onDone]);
 
   const [progress, setProgress] = useState(0);
   const [isReady, setIsReady] = useState(false);
@@ -191,10 +179,10 @@ export default function PaintingCanvas({
 
       // Brush-size levels (grid resolution), coarse → fine. The brush shrinks
       // to the next level only when a difference/stall condition is met (see
-      // the step loop), not after a fixed number of strokes. A final exact
-      // pass follows the finest level.
-      const gridStages = [6, 12, 24, 48, 96, 180];
-      const totalStages = gridStages.length + 1;
+      // the step loop), not after a fixed number of strokes. At the finest
+      // level the process continues indefinitely.
+      const gridStages = [1, 3, 6, 12, 24, 48, 96, 180];
+      const totalStages = gridStages.length;
       setStageCount(totalStages);
 
       const buildCells = (cellsAcross: number): Cell[] => {
@@ -468,7 +456,7 @@ export default function PaintingCanvas({
       // Brush-shrink tracking.
       // (A) shrink once the difference falls to 2/3 of its value at the last
       //     shrink; (B) shrink after this many consecutive non-improving moves.
-      const SHRINK_DIFFERENCE_RATIO = 2 / 3;
+      const SHRINK_DIFFERENCE_RATIO = 1 / 3;
       const SHRINK_NEGATIVE_STREAK = 20;
       let differenceAtLastShrink = currentDifference;
       let consecutiveNegative = 0;
@@ -562,31 +550,42 @@ export default function PaintingCanvas({
         }, stagePauseMs);
       };
 
-      // Whether either shrink condition is currently satisfied.
-      const shouldShrink = (): boolean =>
-        currentDifference <= SHRINK_DIFFERENCE_RATIO * differenceAtLastShrink ||
-        consecutiveNegative >= SHRINK_NEGATIVE_STREAK;
+      const atFinestLevel = () => currentStage >= stages.length - 1;
 
-      const runExactFinalPass = () => {
-        if (cancelled) return;
-        setStageIndex(stages.length);
-        setStageLabel(STAGE_LABELS[STAGE_LABELS.length - 1]);
-        ctx.drawImage(source, 0, 0, width, height); // identical to original
+      // Whether either shrink condition is satisfied. Only applies above the
+      // finest level — at the finest level there's nothing smaller to shrink
+      // to, so a stall there finishes the painting instead (see shouldFinish).
+      const shouldShrink = (): boolean => {
+        if (atFinestLevel()) return false;
+        return (
+          currentDifference <= SHRINK_DIFFERENCE_RATIO * differenceAtLastShrink ||
+          consecutiveNegative >= SHRINK_NEGATIVE_STREAK
+        );
+      };
+
+      // The painting is complete once the finest brush can no longer improve
+      // the image — i.e. it stalls (a run of non-improving strokes). The
+      // canvas converges to the target through brushwork alone; we never copy
+      // the source over it.
+      const shouldFinish = (): boolean =>
+        atFinestLevel() && consecutiveNegative >= SHRINK_NEGATIVE_STREAK;
+
+      const finish = () => {
         setProgress(1);
         setFinished(true);
-        onDoneRef.current?.();
+        // Stop the loop: no further frames are scheduled.
       };
 
       const step = () => {
         if (cancelled) return;
 
-        // Finished all brush levels → exact final pass.
-        if (currentStage >= stages.length) {
-          runExactFinalPass();
+        if (paused) return; // waiting between levels; timeout will resume
+
+        // If we're between strokes and the finest brush has stalled, finish.
+        if (!current && shouldFinish()) {
+          finish();
           return;
         }
-
-        if (paused) return; // waiting between levels; timeout will resume
 
         // If we're between strokes and a shrink condition is met, shrink now.
         if (!current && shouldShrink()) {
@@ -606,13 +605,21 @@ export default function PaintingCanvas({
           while (
             result === NextResult.Skipped &&
             skips < maxSkipsPerFrame &&
-            !shouldShrink()
+            !shouldShrink() &&
+            !shouldFinish()
           ) {
             skips++;
             result = beginNextStroke();
           }
 
-          // (B) a long non-improving streak triggers a shrink.
+          // At the finest level, a long non-improving streak means the
+          // brushwork has converged — the painting is complete.
+          if (shouldFinish()) {
+            finish();
+            return;
+          }
+
+          // Above the finest level, a shrink condition drops to a smaller brush.
           if (shouldShrink()) {
             shrinkBrush();
             rafRef.current = requestAnimationFrame(step);
@@ -703,10 +710,10 @@ export default function PaintingCanvas({
           <span className="font-medium text-zinc-700 dark:text-zinc-300">
             {finished
               ? "Finished"
-              : `Stage ${Math.min(stageIndex + 1, stageCount)} of ${stageCount}`}
+              : `Brush ${Math.min(stageIndex + 1, stageCount)} of ${stageCount}`}
           </span>
           <span className="text-zinc-500 dark:text-zinc-400">
-            {finished ? "Identical to original" : stageLabel}
+            {finished ? "Painting complete" : stageLabel}
           </span>
         </div>
         <div

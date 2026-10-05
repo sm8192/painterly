@@ -7,7 +7,6 @@ import PaintingCanvas from "./PaintingCanvas";
 export default function PainterlyApp() {
   const [file, setFile] = useState<File | null>(null);
   const [replayKey, setReplayKey] = useState(0);
-  const [done, setDone] = useState(false);
 
   // Draft values track the slider thumb live; applied values are what the
   // canvas actually uses. We commit draft → applied on release so dragging a
@@ -19,13 +18,11 @@ export default function PainterlyApp() {
 
   const commitSpeed = useCallback(() => {
     setSpeed(speedDraft);
-    setDone(false);
     setReplayKey((k) => k + 1);
   }, [speedDraft]);
 
   const commitCandidates = useCallback(() => {
     setCandidates(candidatesDraft);
-    setDone(false);
     setReplayKey((k) => k + 1);
   }, [candidatesDraft]);
 
@@ -40,22 +37,17 @@ export default function PainterlyApp() {
 
   const handleSelected = useCallback((next: SelectedImage | null) => {
     setFile(next?.file ?? null);
-    setDone(false);
     setReplayKey((k) => k + 1);
   }, []);
 
   const replay = useCallback(() => {
-    setDone(false);
     setReplayKey((k) => k + 1);
   }, []);
 
   const reset = useCallback(() => {
     // Dropping the file triggers the effect cleanup, which revokes the URL.
     setFile(null);
-    setDone(false);
   }, []);
-
-  const handleDone = useCallback(() => setDone(true), []);
 
   if (!file || !url) {
     return <ImageUploader onImageSelected={handleSelected} />;
@@ -66,7 +58,6 @@ export default function PainterlyApp() {
       <PaintingCanvas
         src={url}
         replayKey={replayKey}
-        onDone={handleDone}
         strokeSpeed={speed}
         candidatesPerStroke={candidates}
       />
@@ -121,7 +112,7 @@ export default function PainterlyApp() {
           onClick={replay}
           className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
         >
-          {done ? "Paint again" : "Restart"}
+          Restart
         </button>
         <button
           type="button"
