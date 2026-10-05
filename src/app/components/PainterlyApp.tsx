@@ -12,9 +12,9 @@ export default function PainterlyApp() {
   // canvas actually uses. We commit draft → applied on release so dragging a
   // slider doesn't restart the painting on every tick.
   const [speedDraft, setSpeedDraft] = useState(3);
-  const [speed, setSpeed] = useState(3);
-  const [candidatesDraft, setCandidatesDraft] = useState(20);
-  const [candidates, setCandidates] = useState(20);
+  const [speed, setSpeed] = useState(12);
+  const [candidatesDraft, setCandidatesDraft] = useState(1000);
+  const [candidates, setCandidates] = useState(1000);
 
   const commitSpeed = useCallback(() => {
     setSpeed(speedDraft);
