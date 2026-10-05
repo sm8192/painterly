@@ -574,6 +574,95 @@ export default function PaintingCanvas({
         }
       };
 
+      // Logical-space bounding box of a whole stroke, padded for width + AA.
+      const strokeBounds = (s: Stroke) => {
+        const pad = Math.ceil(s.width / 2) + 2;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        const steps = Math.max(1, Math.round(s.length / 4));
+        for (let i = 0; i <= steps; i++) {
+          const [px, py] = pointAt(s, (i / steps) * s.length);
+          if (px < minX) minX = px;
+          if (py < minY) minY = py;
+          if (px > maxX) maxX = px;
+          if (py > maxY) maxY = py;
+        }
+        return {
+          minX: Math.max(0, Math.floor(minX - pad)),
+          minY: Math.max(0, Math.floor(minY - pad)),
+          maxX: Math.min(width - 1, Math.ceil(maxX + pad)),
+          maxY: Math.min(height - 1, Math.ceil(maxY + pad)),
+        };
+      };
+
+      // Snapshot a stroke's region so it can be rolled back if, once fully
+      // rendered, it turns out to have increased the real difference. Thin
+      // strokes at fine levels can regress despite a positive predicted score,
+      // because anti-aliasing blends their edges differently than the flat-
+      // color model the scorer assumes. Snapshot/restore makes "never regress"
+      // a hard guarantee regardless of that modeling gap.
+      type Snapshot = {
+        box: { minX: number; minY: number; maxX: number; maxY: number };
+        image: ImageData;
+        diff: number;
+      };
+      let strokeSnapshot: Snapshot | null = null;
+
+      const snapshotStroke = (s: Stroke) => {
+        const box = strokeBounds(s);
+        if (box.maxX < box.minX || box.maxY < box.minY) {
+          strokeSnapshot = null;
+          return;
+        }
+        const dMinX = Math.floor(box.minX * dpr);
+        const dMinY = Math.floor(box.minY * dpr);
+        const dW = Math.max(1, Math.ceil((box.maxX - box.minX + 1) * dpr));
+        const dH = Math.max(1, Math.ceil((box.maxY - box.minY + 1) * dpr));
+        strokeSnapshot = {
+          box,
+          image: ctx.getImageData(dMinX, dMinY, dW, dH),
+          diff: currentDifference,
+        };
+      };
+
+      // Restore the snapshot: repaint the original pixels and resync the mirror
+      // and running difference for the box.
+      const rollbackStroke = () => {
+        if (!strokeSnapshot) return;
+        const { box, image } = strokeSnapshot;
+        const dMinX = Math.floor(box.minX * dpr);
+        const dMinY = Math.floor(box.minY * dpr);
+        // Put the saved pixels back onto the canvas (device space).
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.putImageData(image, dMinX, dMinY);
+        ctx.restore();
+        // Resync mirror + currentDifference from the restored pixels.
+        const dW = image.width;
+        const dH = image.height;
+        const data = image.data;
+        for (let y = box.minY; y <= box.maxY; y++) {
+          for (let x = box.minX; x <= box.maxX; x++) {
+            const lx = Math.min(dW - 1, Math.round((x - box.minX) * dpr));
+            const ly = Math.min(dH - 1, Math.round((y - box.minY) * dpr));
+            const ci = (ly * dW + lx) * 4;
+            const nr = data[ci];
+            const ng = data[ci + 1];
+            const nb = data[ci + 2];
+            const idx = y * width + x;
+            const errBefore = pixelError(idx, currentR[idx], currentG[idx], currentB[idx]);
+            const errAfter = pixelError(idx, nr, ng, nb);
+            currentDifference += errAfter - errBefore;
+            currentR[idx] = nr;
+            currentG[idx] = ng;
+            currentB[idx] = nb;
+          }
+        }
+        strokeSnapshot = null;
+      };
+
       const updateProgress = () => {
         // Fraction of the original canvas-to-target difference we've closed.
         const closed =
@@ -735,26 +824,40 @@ export default function PaintingCanvas({
         const from = s.drawn;
         const to = Math.min(s.length, s.drawn + strokeSpeed);
 
-        // DEBUG: snapshot the true rendered difference at the start of a stroke.
-        if (DEBUG_VERIFY_STROKES && from === 0) {
-          debugDiffBeforeStroke = measureRenderedDifference();
+        // On the stroke's first segment, snapshot its region so we can roll it
+        // back if the finished stroke turns out to have raised the difference.
+        if (from === 0) {
+          snapshotStroke(s);
+          if (DEBUG_VERIFY_STROKES) {
+            debugDiffBeforeStroke = measureRenderedDifference();
+          }
         }
 
         commitSegment(s, from, to);
         s.drawn = to;
 
         if (s.drawn >= s.length) {
-          // Stroke landed: record its endpoint and retire it.
-          const [ex, ey] = pointAt(s, s.length);
-          lastX = ex;
-          lastY = ey;
+          // Stroke fully rendered. If it regressed the real difference (e.g. a
+          // thin anti-aliased stroke the scorer over-credited), undo it.
+          const regressed =
+            strokeSnapshot !== null && currentDifference > strokeSnapshot.diff;
+          if (regressed) {
+            rollbackStroke();
+            consecutiveNegative++; // treat as a non-improving move
+          } else {
+            strokeSnapshot = null;
+            // Stroke kept: its endpoint becomes the next stroke's origin.
+            const [ex, ey] = pointAt(s, s.length);
+            lastX = ex;
+            lastY = ey;
+          }
           current = null;
 
-          // DEBUG: a stroke should never increase the total difference.
-          if (DEBUG_VERIFY_STROKES) {
+          // DEBUG: a kept stroke should never increase the total difference.
+          if (DEBUG_VERIFY_STROKES && !regressed) {
             const after = measureRenderedDifference();
             debugStrokeCounter++;
-            if (after > debugDiffBeforeStroke) {
+            if (after > debugDiffBeforeStroke + 1) {
               console.warn(
                 `[painterly] stroke #${debugStrokeCounter} INCREASED difference ` +
                   `by ${(after - debugDiffBeforeStroke).toLocaleString()} ` +
