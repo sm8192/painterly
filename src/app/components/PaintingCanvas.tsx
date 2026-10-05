@@ -372,22 +372,27 @@ export default function PaintingCanvas({
       // before (current canvas vs target) and after (stroke color vs target).
       // A positive score means the stroke makes the painting more accurate.
       const scoreStroke = (s: Stroke): number => {
-        const stepPx = Math.max(2, s.width * 0.6);
-        const steps = Math.max(2, Math.round(s.length / stepPx));
+        // Sample the stroke's footprint at a FIXED pixel spacing, independent
+        // of brush size, so the whole stroke is evaluated — not just a couple
+        // of points. (Tying the step to brush width previously under-sampled
+        // large coarse strokes, making early scores little better than noise.)
+        const SAMPLE_SPACING = 3; // px between samples, along and across
+        const lengthSteps = Math.max(1, Math.round(s.length / SAMPLE_SPACING));
         const halfW = s.width / 2;
-        // Sample the center plus two offsets across the brush width.
-        const offsets = [-halfW * 0.6, 0, halfW * 0.6];
+        const widthSteps = Math.max(1, Math.round(s.width / SAMPLE_SPACING));
 
         let improvement = 0;
-        for (let i = 0; i <= steps; i++) {
-          const d = (i / steps) * s.length;
+        for (let i = 0; i <= lengthSteps; i++) {
+          const d = (i / lengthSteps) * s.length;
           const [px, py] = pointAt(s, d);
           // Perpendicular direction for width sampling.
           const a = s.angle + s.curvature * d + Math.PI / 2;
           const ox = Math.cos(a);
           const oy = Math.sin(a);
 
-          for (const off of offsets) {
+          // Walk the full brush width in fixed-spacing steps.
+          for (let j = 0; j <= widthSteps; j++) {
+            const off = widthSteps === 0 ? 0 : -halfW + (s.width * j) / widthSteps;
             const sx = px + ox * off;
             const sy = py + oy * off;
             if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
