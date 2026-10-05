@@ -207,7 +207,9 @@ export default function PaintingCanvas({
               h: cellSize,
               cx: x + cellSize / 2,
               cy: y + cellSize / 2,
-              color: `rgba(${r}, ${g}, ${b}, ${data[i + 3] / 255})`,
+              // Always fully opaque: ignore any alpha in the source image so
+              // strokes never paint semi-transparently.
+              color: `rgb(${r}, ${g}, ${b})`,
               r,
               g,
               b,
@@ -317,13 +319,20 @@ export default function PaintingCanvas({
         // Base heading follows the local contour; candidates deviate a little.
         const baseAngle = contourAngleAt(cell.cx, cell.cy);
         const angle = baseAngle + (Math.random() - 0.5) * 0.9;
-        // Longer, bolder strokes early; shorter, fine strokes late.
+        // Longer, bolder strokes early; shorter, fine strokes late. The random
+        // factor spans 0 → 4.5, so a stroke can be anything from a single dot
+        // (length ~0, rendered as one round brush-width dab) up to the max.
         const lengthFactor = stage <= 1 ? 4.5 : stage <= 3 ? 3.2 : 2.2;
-        const length =
-          Math.max(cell.w, cell.h) * lengthFactor * (0.5 + Math.random());
+        const length = Math.max(cell.w, cell.h) * lengthFactor * (Math.random() * 4.5);
         const width =
           Math.max(1, stage <= 2 ? cell.h * 0.9 : cell.h * 0.7) *
           (0.75 + Math.random() * 0.5);
+        // Curvature is angle-per-px, so a stroke's total sweep is
+        // curvature * length. Derive it from the length and cap the sweep at
+        // ±60° (π/3) so long strokes bend into a gentle arc instead of a spiral.
+        const maxArc = Math.PI / 3;
+        const curvature =
+          length > 0 ? ((Math.random() * 2 - 1) * maxArc) / length : 0;
         return {
           color: cell.color,
           r: cell.r,
@@ -335,7 +344,7 @@ export default function PaintingCanvas({
           x0,
           y0,
           angle,
-          curvature: (Math.random() - 0.5) * 0.08,
+          curvature,
         };
       };
 
@@ -482,14 +491,14 @@ export default function PaintingCanvas({
       const commitSegment = (s: Stroke, from: number, to: number) => {
         const [ax, ay] = pointAt(s, from);
         const [bx, by] = pointAt(s, to);
-        ctx.globalAlpha = currentStage <= 1 ? 0.92 : 1;
+        // Strokes are always fully opaque.
+        ctx.globalAlpha = 1;
         ctx.strokeStyle = s.color;
         ctx.lineWidth = s.width;
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         ctx.lineTo(bx, by);
         ctx.stroke();
-        ctx.globalAlpha = 1;
         commitToMirror(s, from, to);
       };
 

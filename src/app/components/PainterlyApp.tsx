@@ -103,7 +103,7 @@ export default function PainterlyApp() {
           <input
             type="range"
             min={1}
-            max={60}
+            max={1000}
             step={1}
             value={candidatesDraft}
             onChange={(e) => setCandidatesDraft(Number(e.target.value))}
