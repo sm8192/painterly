@@ -186,6 +186,16 @@ export default function PaintingCanvas({
         return cy * width + cx;
       };
 
+      // Map a logical coordinate to its device-buffer pixel index along one
+      // axis. Every place that reads back real canvas pixels (reconcile,
+      // rollback, and the debug measurement) MUST use this identical mapping,
+      // or their difference totals drift apart on fractional-DPR displays.
+      const maxDevX = Math.round(width * dpr) - 1;
+      const maxDevY = Math.round(height * dpr) - 1;
+      const deviceCoord = (c: number) => Math.round(c * dpr);
+      const deviceX = (x: number) => Math.min(maxDevX, Math.max(0, deviceCoord(x)));
+      const deviceY = (y: number) => Math.min(maxDevY, Math.max(0, deviceCoord(y)));
+
       // Local luminance, used to orient strokes along image contours.
       const luminanceAt = (x: number, y: number): number => {
         const cx = Math.min(width - 1, Math.max(0, Math.floor(x)));
@@ -543,21 +553,24 @@ export default function PaintingCanvas({
         const maxY = Math.min(height - 1, Math.ceil(Math.max(ay, by) + pad));
         if (maxX < minX || maxY < minY) return;
 
-        const bw = maxX - minX + 1;
-        const bh = maxY - minY + 1;
-        // Read the real pixels in device space, then sample back to the logical
-        // grid so indices line up with the target `pixels` and the mirror.
-        const dMinX = Math.floor(minX * dpr);
-        const dMinY = Math.floor(minY * dpr);
-        const dW = Math.max(1, Math.ceil(bw * dpr));
-        const dH = Math.max(1, Math.ceil(bh * dpr));
+        // Read the sub-rectangle in device space. Crucially, we map logical →
+        // device pixels with the SAME formula used everywhere else
+        // (deviceCoord), so the incremental running difference stays identical
+        // to the independent whole-canvas measurement — otherwise rounding
+        // differences on fractional-DPR displays make them drift and the
+        // regression check misfires.
+        const dMinX = deviceX(minX);
+        const dMinY = deviceY(minY);
+        const dMaxX = deviceX(maxX);
+        const dMaxY = deviceY(maxY);
+        const dW = dMaxX - dMinX + 1;
+        const dH = dMaxY - dMinY + 1;
         const data = ctx.getImageData(dMinX, dMinY, dW, dH).data;
 
         for (let y = minY; y <= maxY; y++) {
           for (let x = minX; x <= maxX; x++) {
-            // Nearest device pixel for this logical pixel.
-            const lx = Math.min(dW - 1, Math.round((x - minX) * dpr));
-            const ly = Math.min(dH - 1, Math.round((y - minY) * dpr));
+            const lx = deviceX(x) - dMinX;
+            const ly = deviceY(y) - dMinY;
             const ci = (ly * dW + lx) * 4;
             const nr = data[ci];
             const ng = data[ci + 1];
@@ -616,10 +629,14 @@ export default function PaintingCanvas({
           strokeSnapshot = null;
           return;
         }
-        const dMinX = Math.floor(box.minX * dpr);
-        const dMinY = Math.floor(box.minY * dpr);
-        const dW = Math.max(1, Math.ceil((box.maxX - box.minX + 1) * dpr));
-        const dH = Math.max(1, Math.ceil((box.maxY - box.minY + 1) * dpr));
+        // Capture exactly the device rectangle that spans the logical box,
+        // using the shared mapping so restore reads identical pixels.
+        const dMinX = deviceX(box.minX);
+        const dMinY = deviceY(box.minY);
+        const dMaxX = deviceX(box.maxX);
+        const dMaxY = deviceY(box.maxY);
+        const dW = dMaxX - dMinX + 1;
+        const dH = dMaxY - dMinY + 1;
         strokeSnapshot = {
           box,
           image: ctx.getImageData(dMinX, dMinY, dW, dH),
@@ -632,21 +649,21 @@ export default function PaintingCanvas({
       const rollbackStroke = () => {
         if (!strokeSnapshot) return;
         const { box, image } = strokeSnapshot;
-        const dMinX = Math.floor(box.minX * dpr);
-        const dMinY = Math.floor(box.minY * dpr);
+        const dMinX = deviceX(box.minX);
+        const dMinY = deviceY(box.minY);
         // Put the saved pixels back onto the canvas (device space).
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.putImageData(image, dMinX, dMinY);
         ctx.restore();
-        // Resync mirror + currentDifference from the restored pixels.
+        // Resync mirror + currentDifference from the restored pixels, mapping
+        // logical → device with the same shared formula.
         const dW = image.width;
-        const dH = image.height;
         const data = image.data;
         for (let y = box.minY; y <= box.maxY; y++) {
           for (let x = box.minX; x <= box.maxX; x++) {
-            const lx = Math.min(dW - 1, Math.round((x - box.minX) * dpr));
-            const ly = Math.min(dH - 1, Math.round((y - box.minY) * dpr));
+            const lx = deviceX(x) - dMinX;
+            const ly = deviceY(y) - dMinY;
             const ci = (ly * dW + lx) * 4;
             const nr = data[ci];
             const ng = data[ci + 1];
@@ -688,8 +705,8 @@ export default function PaintingCanvas({
         let total = 0;
         for (let y = 0; y < height; y++) {
           for (let x = 0; x < width; x++) {
-            const sx = Math.min(base.width - 1, Math.round(x * dpr));
-            const sy = Math.min(base.height - 1, Math.round(y * dpr));
+            const sx = deviceX(x);
+            const sy = deviceY(y);
             const ci = (sy * base.width + sx) * 4;
             const ti = (y * width + x) * 4;
             total +=
