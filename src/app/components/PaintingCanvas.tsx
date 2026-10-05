@@ -78,8 +78,8 @@ export default function PaintingCanvas({
   maxSize = 640,
   replayKey = 0,
   stagePauseMs = 550,
-  strokeSpeed = 3,
-  candidatesPerStroke = 20,
+  strokeSpeed = 12,
+  candidatesPerStroke = 1000,
 }: PaintingCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -181,7 +181,7 @@ export default function PaintingCanvas({
       // to the next level only when a difference/stall condition is met (see
       // the step loop), not after a fixed number of strokes. At the finest
       // level the process continues indefinitely.
-      const gridStages = [6, 12, 24, 48, 96, 180, 360, 640];
+      const gridStages = [6, 24, 96, 180, 360, 640];
       const totalStages = gridStages.length;
       setStageCount(totalStages);
 
@@ -456,7 +456,7 @@ export default function PaintingCanvas({
       // Brush-shrink tracking.
       // (A) shrink once the difference falls to 2/3 of its value at the last
       //     shrink; (B) shrink after this many consecutive non-improving moves.
-      const SHRINK_DIFFERENCE_RATIO = 1 / 3;
+      const SHRINK_DIFFERENCE_RATIO = 1 / 4;
       const SHRINK_NEGATIVE_STREAK = 20;
       let differenceAtLastShrink = currentDifference;
       let consecutiveNegative = 0;
