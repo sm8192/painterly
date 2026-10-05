@@ -181,7 +181,7 @@ export default function PaintingCanvas({
       // to the next level only when a difference/stall condition is met (see
       // the step loop), not after a fixed number of strokes. At the finest
       // level the process continues indefinitely.
-      const gridStages = [1, 3, 6, 12, 24, 48, 96, 180];
+      const gridStages = [6, 12, 24, 48, 96, 180, 360, 640];
       const totalStages = gridStages.length;
       setStageCount(totalStages);
 
