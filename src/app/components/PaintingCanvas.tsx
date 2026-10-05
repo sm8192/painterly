@@ -443,35 +443,6 @@ export default function PaintingCanvas({
         return improvement;
       };
 
-      // Write the stroke's color into the in-memory mirror along a path
-      // segment, so later candidate scoring reflects what we actually painted.
-      const commitToMirror = (s: Stroke, from: number, to: number) => {
-        const stepPx = Math.max(1, s.width * 0.4);
-        const steps = Math.max(1, Math.round((to - from) / stepPx));
-        const halfW = s.width / 2;
-        for (let i = 0; i <= steps; i++) {
-          const d = from + ((to - from) * i) / steps;
-          const [px, py] = pointAt(s, d);
-          const a = s.angle + s.curvature * d + Math.PI / 2;
-          const ox = Math.cos(a);
-          const oy = Math.sin(a);
-          for (let off = -halfW; off <= halfW; off += 1) {
-            const sx = px + ox * off;
-            const sy = py + oy * off;
-            if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
-            const idx = pixelIndex(sx, sy);
-            // Keep the running difference in sync: swap this pixel's old error
-            // for its new error after painting the stroke color here.
-            const errBefore = pixelError(idx, currentR[idx], currentG[idx], currentB[idx]);
-            const errAfter = pixelError(idx, s.r, s.g, s.b);
-            currentDifference += errAfter - errBefore;
-            currentR[idx] = s.r;
-            currentG[idx] = s.g;
-            currentB[idx] = s.b;
-          }
-        }
-      };
-
       let currentStage = 0;
       let paused = false;
 
@@ -521,31 +492,96 @@ export default function PaintingCanvas({
         lastX = cell.cx;
         lastY = cell.cy;
 
-        // Only paint if the best candidate actually improves the match.
-        if (best && bestScore > 0) {
-          current = best;
-          consecutiveNegative = 0; // (B) reset: this move improved the image
-          return NextResult.Started;
+        // Only paint if the best candidate improves the match by more than a
+        // safety margin. The scorer models strokes as flat color, but the
+        // canvas renders anti-aliased edges, so the true result can differ
+        // slightly along the stroke's perimeter. Requiring the predicted gain
+        // to exceed roughly that perimeter's worst-case error means a committed
+        // stroke virtually never regresses the real difference.
+        if (best) {
+          // Margin ≈ (edge-pixel count) × (typical AA edge error per pixel).
+          // AA only touches a ~1px border, so the uncertain pixel count scales
+          // with the perimeter; each such pixel is a partial blend, so its
+          // error is a fraction of full scale, not the 255/255² worst case.
+          const perimeter = 2 * (best.length + best.width);
+          const edgeErr = useSquared ? 40 * 40 : 40; // ~partial blend per channel-ish
+          const margin = perimeter * edgeErr;
+          if (bestScore > margin) {
+            current = best;
+            consecutiveNegative = 0; // (B) reset: this move improved the image
+            return NextResult.Started;
+          }
         }
 
         consecutiveNegative++; // (B) count a non-improving move
         return NextResult.Skipped;
       };
 
-      // Commit one path segment of a stroke onto the base canvas, and mirror
-      // the same paint into the in-memory buffer used for candidate scoring.
+      // Commit one path segment of a stroke onto the base canvas, then
+      // reconcile the mirror + running difference from the ACTUAL rendered
+      // pixels in the affected region. Reading back what the canvas really drew
+      // (anti-aliased edges, round caps, and all) keeps `currentDifference`
+      // exactly equal to the true canvas-vs-target difference — so the scorer's
+      // "before" state is never a lie and the debug check can't find drift.
       const commitSegment = (s: Stroke, from: number, to: number) => {
         const [ax, ay] = pointAt(s, from);
         const [bx, by] = pointAt(s, to);
-        // Strokes are always fully opaque.
-        ctx.globalAlpha = 1;
+        ctx.globalAlpha = 1; // strokes are always fully opaque
         ctx.strokeStyle = s.color;
         ctx.lineWidth = s.width;
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         ctx.lineTo(bx, by);
         ctx.stroke();
-        commitToMirror(s, from, to);
+
+        reconcileRegion(ax, ay, bx, by, s.width);
+      };
+
+      // Reconcile the mirror and running difference with the real canvas over
+      // the bounding box of a drawn segment (expanded for cap/AA footprint).
+      const reconcileRegion = (
+        ax: number,
+        ay: number,
+        bx: number,
+        by: number,
+        strokeWidth: number,
+      ) => {
+        const pad = Math.ceil(strokeWidth / 2) + 2; // half-width + AA margin
+        const minX = Math.max(0, Math.floor(Math.min(ax, bx) - pad));
+        const minY = Math.max(0, Math.floor(Math.min(ay, by) - pad));
+        const maxX = Math.min(width - 1, Math.ceil(Math.max(ax, bx) + pad));
+        const maxY = Math.min(height - 1, Math.ceil(Math.max(ay, by) + pad));
+        if (maxX < minX || maxY < minY) return;
+
+        const bw = maxX - minX + 1;
+        const bh = maxY - minY + 1;
+        // Read the real pixels in device space, then sample back to the logical
+        // grid so indices line up with the target `pixels` and the mirror.
+        const dMinX = Math.floor(minX * dpr);
+        const dMinY = Math.floor(minY * dpr);
+        const dW = Math.max(1, Math.ceil(bw * dpr));
+        const dH = Math.max(1, Math.ceil(bh * dpr));
+        const data = ctx.getImageData(dMinX, dMinY, dW, dH).data;
+
+        for (let y = minY; y <= maxY; y++) {
+          for (let x = minX; x <= maxX; x++) {
+            // Nearest device pixel for this logical pixel.
+            const lx = Math.min(dW - 1, Math.round((x - minX) * dpr));
+            const ly = Math.min(dH - 1, Math.round((y - minY) * dpr));
+            const ci = (ly * dW + lx) * 4;
+            const nr = data[ci];
+            const ng = data[ci + 1];
+            const nb = data[ci + 2];
+
+            const idx = y * width + x;
+            const errBefore = pixelError(idx, currentR[idx], currentG[idx], currentB[idx]);
+            const errAfter = pixelError(idx, nr, ng, nb);
+            currentDifference += errAfter - errBefore;
+            currentR[idx] = nr;
+            currentG[idx] = ng;
+            currentB[idx] = nb;
+          }
+        }
       };
 
       const updateProgress = () => {
