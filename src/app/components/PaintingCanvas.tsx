@@ -213,7 +213,7 @@ export default function PaintingCanvas({
       // to the next level only when a difference/stall condition is met (see
       // the step loop), not after a fixed number of strokes. At the finest
       // level the process continues indefinitely.
-      const gridStages = [8, 16, 32, 64, 128, 256, 480];
+      const gridStages = [16, 32, 64, 128, 256, 480];
       const totalStages = gridStages.length;
       setStageCount(totalStages);
 
@@ -469,7 +469,7 @@ export default function PaintingCanvas({
       // and relaxes later: 1/8 for the first level, 1/6 for the second, 1/4 for
       // every level after that. A smaller ratio = must close more of the gap
       // before shrinking.
-      const SHRINK_DIFFERENCE_RATIOS = [1 / 8, 1 / 2, 1 / 4];
+      const SHRINK_DIFFERENCE_RATIOS = [1 / 8, 1 / 4];
       const SHRINK_DIFFERENCE_RATIO_REST = 1 / 4;
       const shrinkRatioFor = (level: number): number =>
         level < SHRINK_DIFFERENCE_RATIOS.length
