@@ -27,16 +27,6 @@ interface PaintingCanvasProps {
   errorMetric?: "squared" | "absolute";
 }
 
-/** Human-readable label for each brush-size level, coarse → fine. */
-const STAGE_LABELS = [
-  "Blocking in base shapes",
-  "Massing in color",
-  "Shaping forms",
-  "Building midtones",
-  "Adding detail",
-  "Refining fine detail",
-];
-
 /** A cell's sampled color and footprint on the canvas. */
 interface Cell {
   x: number;
@@ -92,13 +82,18 @@ export default function PaintingCanvas({
   const baseRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Incremented by the Refine button; the paint loop consumes it to shrink the
+  // brush one level. A ref (not state) so it never retriggers the paint effect.
+  const refineRequestsRef = useRef(0);
 
   const [progress, setProgress] = useState(0);
   const [isReady, setIsReady] = useState(false);
-  const [stageIndex, setStageIndex] = useState(0);
-  const [stageCount, setStageCount] = useState(STAGE_LABELS.length);
-  const [stageLabel, setStageLabel] = useState(STAGE_LABELS[0]);
-  const [finished, setFinished] = useState(false);
+  // Whether a finer brush level is still available (disables Refine at finest).
+  const [canRefine, setCanRefine] = useState(false);
+
+  const requestRefine = useCallback(() => {
+    refineRequestsRef.current += 1;
+  }, []);
 
   const paint = useCallback(() => {
     const base = baseRef.current;
@@ -214,8 +209,6 @@ export default function PaintingCanvas({
       // the step loop), not after a fixed number of strokes. At the finest
       // level the process continues indefinitely.
       const gridStages = [16, 32, 64, 128, 256, 480];
-      const totalStages = gridStages.length;
-      setStageCount(totalStages);
 
       const buildCells = (cellsAcross: number): Cell[] => {
         const longest = Math.max(width, height);
@@ -461,23 +454,9 @@ export default function PaintingCanvas({
       let lastX = width / 2;
       let lastY = height / 2;
 
-      // Brush-shrink tracking.
-      // (A) shrink once the difference falls to a per-phase fraction of its
-      //     value at the last shrink; (B) shrink after this many consecutive
-      //     non-improving moves.
-      // The ratio tightens early (invest more work with the coarsest brushes)
-      // and relaxes later: 1/8 for the first level, 1/6 for the second, 1/4 for
-      // every level after that. A smaller ratio = must close more of the gap
-      // before shrinking.
-      const SHRINK_DIFFERENCE_RATIOS = [1 / 8, 1 / 4];
-      const SHRINK_DIFFERENCE_RATIO_REST = 1 / 4;
-      const shrinkRatioFor = (level: number): number =>
-        level < SHRINK_DIFFERENCE_RATIOS.length
-          ? SHRINK_DIFFERENCE_RATIOS[level]
-          : SHRINK_DIFFERENCE_RATIO_REST;
-      const SHRINK_NEGATIVE_STREAK = 20;
-      let differenceAtLastShrink = currentDifference;
-      let consecutiveNegative = 0;
+      // The brush shrinks only on an explicit "Refine" request. This tracks how
+      // many requests we've acted on, compared against refineRequestsRef.
+      let refinesConsumed = 0;
 
       // Outcome of trying to start the next stroke.
       const enum NextResult {
@@ -518,11 +497,9 @@ export default function PaintingCanvas({
         // improvement — no size-scaled margin needed.
         if (best && bestScore > 0) {
           current = best;
-          consecutiveNegative = 0; // (B) reset: this move improved the image
           return NextResult.Started;
         }
 
-        consecutiveNegative++; // (B) count a non-improving move
         return NextResult.Skipped;
       };
 
@@ -699,18 +676,18 @@ export default function PaintingCanvas({
       // Shrink the brush to the next finer level. Resets the shrink trackers,
       // rebuilds the cell supply for the new level, and pauses briefly so the
       // size change reads as a distinct step.
+      const atFinestLevel = () => currentStage >= stages.length - 1;
+
+      // Shrink the brush to the next finer level — triggered only by the user's
+      // Refine button. Rebuilds the cell supply for the new level and pauses
+      // briefly so the size change reads as a distinct step.
       const shrinkBrush = () => {
+        if (atFinestLevel()) return;
         currentStage++;
         current = null;
-        consecutiveNegative = 0;
-        differenceAtLastShrink = currentDifference;
-        if (currentStage < stages.length) {
-          activeIndex = new NearestCells(stages[currentStage]);
-          setStageIndex(currentStage);
-          setStageLabel(
-            STAGE_LABELS[Math.min(currentStage, STAGE_LABELS.length - 1)],
-          );
-        }
+        strokeSnapshot = null;
+        activeIndex = new NearestCells(stages[currentStage]);
+        setCanRefine(!atFinestLevel());
         paused = true;
         timeoutRef.current = setTimeout(() => {
           if (cancelled) return;
@@ -719,31 +696,16 @@ export default function PaintingCanvas({
         }, stagePauseMs);
       };
 
-      const atFinestLevel = () => currentStage >= stages.length - 1;
-
-      // Whether either shrink condition is satisfied. Only applies above the
-      // finest level — at the finest level there's nothing smaller to shrink
-      // to, so a stall there finishes the painting instead (see shouldFinish).
-      const shouldShrink = (): boolean => {
-        if (atFinestLevel()) return false;
-        return (
-          currentDifference <=
-            shrinkRatioFor(currentStage) * differenceAtLastShrink ||
-          consecutiveNegative >= SHRINK_NEGATIVE_STREAK
-        );
-      };
-
-      // The painting is complete once the finest brush can no longer improve
-      // the image — i.e. it stalls (a run of non-improving strokes). The
-      // canvas converges to the target through brushwork alone; we never copy
-      // the source over it.
-      const shouldFinish = (): boolean =>
-        atFinestLevel() && consecutiveNegative >= SHRINK_NEGATIVE_STREAK;
-
-      const finish = () => {
-        setProgress(1);
-        setFinished(true);
-        // Stop the loop: no further frames are scheduled.
+      // Act on any pending Refine request. Returns true if a shrink happened.
+      const consumeRefineRequest = (): boolean => {
+        if (refineRequestsRef.current > refinesConsumed) {
+          refinesConsumed = refineRequestsRef.current;
+          if (!atFinestLevel()) {
+            shrinkBrush();
+            return true;
+          }
+        }
+        return false;
       };
 
       const step = () => {
@@ -751,55 +713,28 @@ export default function PaintingCanvas({
 
         if (paused) return; // waiting between levels; timeout will resume
 
-        // If we're between strokes and the finest brush has stalled, finish.
-        if (!current && shouldFinish()) {
-          finish();
-          return;
-        }
-
-        // If we're between strokes and a shrink condition is met, shrink now.
-        if (!current && shouldShrink()) {
-          shrinkBrush();
+        // Honor a Refine request between strokes (shrinks the brush one level).
+        if (!current && consumeRefineRequest()) {
           rafRef.current = requestAnimationFrame(step);
           return;
         }
 
         // Make sure we have a stroke to work on. Non-improving moves ("skips")
         // don't paint anything, so keep pulling cells until one is worth
-        // painting, a shrink condition fires, or the supply empties. Cap the
-        // skips per frame so a mostly-correct level can't block the frame.
+        // painting or the supply empties. Cap the skips per frame so a mostly-
+        // correct level can't block the frame.
         if (!current) {
           const maxSkipsPerFrame = 256;
           let skips = 0;
           let result = beginNextStroke();
-          while (
-            result === NextResult.Skipped &&
-            skips < maxSkipsPerFrame &&
-            !shouldShrink() &&
-            !shouldFinish()
-          ) {
+          while (result === NextResult.Skipped && skips < maxSkipsPerFrame) {
             skips++;
             result = beginNextStroke();
           }
 
-          // At the finest level, a long non-improving streak means the
-          // brushwork has converged — the painting is complete.
-          if (shouldFinish()) {
-            finish();
-            return;
-          }
-
-          // Above the finest level, a shrink condition drops to a smaller brush.
-          if (shouldShrink()) {
-            shrinkBrush();
-            rafRef.current = requestAnimationFrame(step);
-            return;
-          }
-
           if (result === NextResult.Empty) {
-            // Supply exhausted at this size without a shrink condition yet.
-            // Refill the level's cells and keep painting at the same brush
-            // size; the shrink conditions will eventually advance the level.
+            // Supply exhausted at this size. Refill and keep refining at the
+            // same brush until the user asks for a finer one.
             activeIndex = new NearestCells(stages[currentStage]);
             updateProgress();
             rafRef.current = requestAnimationFrame(step);
@@ -836,7 +771,6 @@ export default function PaintingCanvas({
             strokeSnapshot !== null && currentDifference > strokeSnapshot.diff;
           if (regressed) {
             rollbackStroke();
-            consecutiveNegative++; // treat as a non-improving move
           } else {
             strokeSnapshot = null;
             // Stroke kept: its endpoint becomes the next stroke's origin.
@@ -852,10 +786,10 @@ export default function PaintingCanvas({
       };
 
       setIsReady(true);
-      setFinished(false);
       setProgress(0);
-      setStageIndex(0);
-      setStageLabel(STAGE_LABELS[0]);
+      refineRequestsRef.current = 0;
+      refinesConsumed = 0;
+      setCanRefine(stages.length > 1); // a finer level exists to refine into
       rafRef.current = requestAnimationFrame(step);
     };
 
@@ -893,16 +827,6 @@ export default function PaintingCanvas({
       </div>
 
       <div className="flex w-full max-w-md flex-col gap-1.5">
-        <div className="flex items-center justify-between text-sm">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            {finished
-              ? "Finished"
-              : `Brush ${Math.min(stageIndex + 1, stageCount)} of ${stageCount}`}
-          </span>
-          <span className="text-zinc-500 dark:text-zinc-400">
-            {finished ? "Painting complete" : stageLabel}
-          </span>
-        </div>
         <div
           className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
           role="progressbar"
@@ -916,6 +840,15 @@ export default function PaintingCanvas({
             style={{ width: `${Math.round(progress * 100)}%` }}
           />
         </div>
+
+        <button
+          type="button"
+          onClick={requestRefine}
+          disabled={!canRefine}
+          className="self-center rounded-full bg-indigo-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Refine
+        </button>
       </div>
 
       {!isReady && (

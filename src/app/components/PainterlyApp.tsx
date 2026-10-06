@@ -8,14 +8,6 @@ export default function PainterlyApp() {
   const [file, setFile] = useState<File | null>(null);
   const [replayKey, setReplayKey] = useState(0);
 
-  // Draft values track the slider thumb live; applied values are what the
-  // canvas actually uses. We commit draft → applied on release so dragging a
-  // slider doesn't restart the painting on every tick.
-  const [speedDraft, setSpeedDraft] = useState(3);
-  const [speed, setSpeed] = useState(12);
-  const [candidatesDraft, setCandidatesDraft] = useState(1000);
-  const [candidates, setCandidates] = useState(1000);
-
   // How per-pixel color error is measured. Switching restarts the painting.
   const [errorMetric, setErrorMetric] = useState<"squared" | "absolute">(
     "squared",
@@ -25,16 +17,6 @@ export default function PainterlyApp() {
     setErrorMetric(metric);
     setReplayKey((k) => k + 1);
   }, []);
-
-  const commitSpeed = useCallback(() => {
-    setSpeed(speedDraft);
-    setReplayKey((k) => k + 1);
-  }, [speedDraft]);
-
-  const commitCandidates = useCallback(() => {
-    setCandidates(candidatesDraft);
-    setReplayKey((k) => k + 1);
-  }, [candidatesDraft]);
 
   // Derive the object URL from the file during render (no effect/setState).
   const url = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
@@ -68,54 +50,10 @@ export default function PainterlyApp() {
       <PaintingCanvas
         src={url}
         replayKey={replayKey}
-        strokeSpeed={speed}
-        candidatesPerStroke={candidates}
+        strokeSpeed={12}
+        candidatesPerStroke={1000}
         errorMetric={errorMetric}
       />
-
-      <div className="grid w-full max-w-md grid-cols-1 gap-4 sm:grid-cols-2">
-        <label className="flex flex-col gap-1.5 text-sm">
-          <span className="flex items-center justify-between text-zinc-700 dark:text-zinc-300">
-            <span className="font-medium">Brush speed</span>
-            <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
-              {speedDraft} px/frame
-            </span>
-          </span>
-          <input
-            type="range"
-            min={1}
-            max={12}
-            step={1}
-            value={speedDraft}
-            onChange={(e) => setSpeedDraft(Number(e.target.value))}
-            onPointerUp={commitSpeed}
-            onKeyUp={commitSpeed}
-            className="w-full accent-indigo-600"
-            aria-label="Brush speed in pixels per frame"
-          />
-        </label>
-
-        <label className="flex flex-col gap-1.5 text-sm">
-          <span className="flex items-center justify-between text-zinc-700 dark:text-zinc-300">
-            <span className="font-medium">Candidates per stroke</span>
-            <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
-              {candidatesDraft}
-            </span>
-          </span>
-          <input
-            type="range"
-            min={1}
-            max={1000}
-            step={1}
-            value={candidatesDraft}
-            onChange={(e) => setCandidatesDraft(Number(e.target.value))}
-            onPointerUp={commitCandidates}
-            onKeyUp={commitCandidates}
-            className="w-full accent-indigo-600"
-            aria-label="Number of candidate strokes simulated per move"
-          />
-        </label>
-      </div>
 
       <div className="flex w-full max-w-md flex-col gap-1.5 text-sm">
         <span className="font-medium text-zinc-700 dark:text-zinc-300">
