@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Painterly",
-  description: "Upload an image and watch it painted to life, one brushstroke at a time.",
+  description: "Give me an image and I'll paint it for you.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
