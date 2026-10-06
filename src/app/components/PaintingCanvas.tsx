@@ -208,7 +208,7 @@ export default function PaintingCanvas({
       // to the next level only when a difference/stall condition is met (see
       // the step loop), not after a fixed number of strokes. At the finest
       // level the process continues indefinitely.
-      const gridStages = [16, 32, 64, 128, 256, 480];
+      const gridStages = [8, 16, 32, 64, 128, 256, 480];
 
       const buildCells = (cellsAcross: number): Cell[] => {
         const longest = Math.max(width, height);
