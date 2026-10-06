@@ -213,7 +213,7 @@ export default function PaintingCanvas({
       // to the next level only when a difference/stall condition is met (see
       // the step loop), not after a fixed number of strokes. At the finest
       // level the process continues indefinitely.
-      const gridStages = [16, 32, 64, 128, 256, 480];
+      const gridStages = [8, 16, 32, 64, 128, 256, 480];
       const totalStages = gridStages.length;
       setStageCount(totalStages);
 
@@ -462,9 +462,19 @@ export default function PaintingCanvas({
       let lastY = height / 2;
 
       // Brush-shrink tracking.
-      // (A) shrink once the difference falls to 1/5 of its value at the last
-      //     shrink; (B) shrink after this many consecutive non-improving moves.
-      const SHRINK_DIFFERENCE_RATIO = 1 / 5;
+      // (A) shrink once the difference falls to a per-phase fraction of its
+      //     value at the last shrink; (B) shrink after this many consecutive
+      //     non-improving moves.
+      // The ratio tightens early (invest more work with the coarsest brushes)
+      // and relaxes later: 1/8 for the first level, 1/6 for the second, 1/4 for
+      // every level after that. A smaller ratio = must close more of the gap
+      // before shrinking.
+      const SHRINK_DIFFERENCE_RATIOS = [1 / 8, 1 / 6];
+      const SHRINK_DIFFERENCE_RATIO_REST = 1 / 4;
+      const shrinkRatioFor = (level: number): number =>
+        level < SHRINK_DIFFERENCE_RATIOS.length
+          ? SHRINK_DIFFERENCE_RATIOS[level]
+          : SHRINK_DIFFERENCE_RATIO_REST;
       const SHRINK_NEGATIVE_STREAK = 20;
       let differenceAtLastShrink = currentDifference;
       let consecutiveNegative = 0;
@@ -717,7 +727,8 @@ export default function PaintingCanvas({
       const shouldShrink = (): boolean => {
         if (atFinestLevel()) return false;
         return (
-          currentDifference <= SHRINK_DIFFERENCE_RATIO * differenceAtLastShrink ||
+          currentDifference <=
+            shrinkRatioFor(currentStage) * differenceAtLastShrink ||
           consecutiveNegative >= SHRINK_NEGATIVE_STREAK
         );
       };
