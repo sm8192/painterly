@@ -82,17 +82,27 @@ export default function PaintingCanvas({
   const baseRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Incremented by the Refine button; the paint loop consumes it to shrink the
-  // brush one level. A ref (not state) so it never retriggers the paint effect.
-  const refineRequestsRef = useRef(0);
+  // Queue of pending brush-level change requests: +1 = finer, -1 = coarser.
+  // Filled by the buttons, drained by the paint loop (a ref so it never
+  // retriggers the paint effect).
+  const levelRequestsRef = useRef<number[]>([]);
+  // The brush level the next paint run should start at. Persists across
+  // replays so "Restart" keeps the current level instead of resetting to 0.
+  const startLevelRef = useRef(0);
+  // Tracks the image currently being painted; a new image resets the level.
+  const lastSrcRef = useRef<string | null>(null);
 
   const [progress, setProgress] = useState(0);
   const [isReady, setIsReady] = useState(false);
-  // Whether a finer brush level is still available (disables Refine at finest).
+  // Whether a coarser / finer brush level is still available (button enablement).
+  const [canCrude, setCanCrude] = useState(false);
   const [canRefine, setCanRefine] = useState(false);
 
+  const requestCrude = useCallback(() => {
+    levelRequestsRef.current.push(-1);
+  }, []);
   const requestRefine = useCallback(() => {
-    refineRequestsRef.current += 1;
+    levelRequestsRef.current.push(1);
   }, []);
 
   const paint = useCallback(() => {
@@ -100,6 +110,13 @@ export default function PaintingCanvas({
     if (!base) return;
     const ctx = base.getContext("2d");
     if (!ctx) return;
+
+    // A genuinely new image starts coarse; a Restart (same src) keeps the
+    // persisted level.
+    if (lastSrcRef.current !== src) {
+      startLevelRef.current = 0;
+      lastSrcRef.current = src;
+    }
 
     let cancelled = false;
     const image = new Image();
@@ -445,7 +462,12 @@ export default function PaintingCanvas({
         return improvement;
       };
 
-      let currentStage = 0;
+      // Start at the persisted level (so Restart keeps the current brush size),
+      // clamped to the valid range.
+      let currentStage = Math.min(
+        stages.length - 1,
+        Math.max(0, startLevelRef.current),
+      );
       let paused = false;
 
       // Only one stroke is painted at a time. We remember where the last one
@@ -454,9 +476,9 @@ export default function PaintingCanvas({
       let lastX = width / 2;
       let lastY = height / 2;
 
-      // The brush shrinks only on an explicit "Refine" request. This tracks how
-      // many requests we've acted on, compared against refineRequestsRef.
-      let refinesConsumed = 0;
+      // Pending brush-level change requests are drained from this index of the
+      // shared queue, so clicks made during one paint run carry over if needed.
+      let levelRequestsConsumed = 0;
 
       // Outcome of trying to start the next stroke.
       const enum NextResult {
@@ -673,21 +695,30 @@ export default function PaintingCanvas({
         setProgress(Math.min(0.999, Math.max(0, closed)));
       };
 
-      // Shrink the brush to the next finer level. Resets the shrink trackers,
-      // rebuilds the cell supply for the new level, and pauses briefly so the
-      // size change reads as a distinct step.
       const atFinestLevel = () => currentStage >= stages.length - 1;
+      const atCoarsestLevel = () => currentStage <= 0;
 
-      // Shrink the brush to the next finer level — triggered only by the user's
-      // Refine button. Rebuilds the cell supply for the new level and pauses
-      // briefly so the size change reads as a distinct step.
-      const shrinkBrush = () => {
-        if (atFinestLevel()) return;
-        currentStage++;
+      // Persist the current level (for Restart) and refresh button enablement.
+      const syncLevelState = () => {
+        startLevelRef.current = currentStage;
+        setCanCrude(!atCoarsestLevel());
+        setCanRefine(!atFinestLevel());
+      };
+
+      // Change the brush by one level: delta +1 = finer, -1 = coarser.
+      // Triggered only by the user's buttons. Rebuilds the cell supply for the
+      // new level and pauses briefly so the size change reads as a distinct step.
+      const changeLevel = (delta: number) => {
+        const next = Math.min(
+          stages.length - 1,
+          Math.max(0, currentStage + delta),
+        );
+        if (next === currentStage) return;
+        currentStage = next;
         current = null;
         strokeSnapshot = null;
         activeIndex = new NearestCells(stages[currentStage]);
-        setCanRefine(!atFinestLevel());
+        syncLevelState();
         paused = true;
         timeoutRef.current = setTimeout(() => {
           if (cancelled) return;
@@ -696,14 +727,16 @@ export default function PaintingCanvas({
         }, stagePauseMs);
       };
 
-      // Act on any pending Refine request. Returns true if a shrink happened.
-      const consumeRefineRequest = (): boolean => {
-        if (refineRequestsRef.current > refinesConsumed) {
-          refinesConsumed = refineRequestsRef.current;
-          if (!atFinestLevel()) {
-            shrinkBrush();
-            return true;
-          }
+      // Act on the next pending level-change request. Returns true if the brush
+      // level actually changed.
+      const consumeLevelRequest = (): boolean => {
+        const queue = levelRequestsRef.current;
+        while (levelRequestsConsumed < queue.length) {
+          const delta = queue[levelRequestsConsumed];
+          levelRequestsConsumed++;
+          const before = currentStage;
+          changeLevel(delta);
+          if (currentStage !== before) return true;
         }
         return false;
       };
@@ -713,8 +746,8 @@ export default function PaintingCanvas({
 
         if (paused) return; // waiting between levels; timeout will resume
 
-        // Honor a Refine request between strokes (shrinks the brush one level).
-        if (!current && consumeRefineRequest()) {
+        // Honor a pending level-change request between strokes.
+        if (!current && consumeLevelRequest()) {
           rafRef.current = requestAnimationFrame(step);
           return;
         }
@@ -787,9 +820,11 @@ export default function PaintingCanvas({
 
       setIsReady(true);
       setProgress(0);
-      refineRequestsRef.current = 0;
-      refinesConsumed = 0;
-      setCanRefine(stages.length > 1); // a finer level exists to refine into
+      // Drop any clicks queued before this run and sync button enablement to
+      // the (persisted) starting level.
+      levelRequestsRef.current = [];
+      levelRequestsConsumed = 0;
+      syncLevelState();
       rafRef.current = requestAnimationFrame(step);
     };
 
@@ -841,14 +876,24 @@ export default function PaintingCanvas({
           />
         </div>
 
-        <button
-          type="button"
-          onClick={requestRefine}
-          disabled={!canRefine}
-          className="self-center rounded-full bg-indigo-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Refine
-        </button>
+        <div className="flex items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={requestCrude}
+            disabled={!canCrude}
+            className="rounded-full border border-zinc-300 px-5 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            More Crude
+          </button>
+          <button
+            type="button"
+            onClick={requestRefine}
+            disabled={!canRefine}
+            className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            More Refined
+          </button>
+        </div>
       </div>
 
       {!isReady && (
