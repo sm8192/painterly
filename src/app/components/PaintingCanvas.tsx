@@ -469,7 +469,7 @@ export default function PaintingCanvas({
       // and relaxes later: 1/8 for the first level, 1/6 for the second, 1/4 for
       // every level after that. A smaller ratio = must close more of the gap
       // before shrinking.
-      const SHRINK_DIFFERENCE_RATIOS = [1 / 8, 1 / 4];
+      const SHRINK_DIFFERENCE_RATIOS = [1 / 8, 1 / 2];
       const SHRINK_DIFFERENCE_RATIO_REST = 1 / 2;
       const shrinkRatioFor = (level: number): number =>
         level < SHRINK_DIFFERENCE_RATIOS.length
