@@ -20,7 +20,7 @@ interface PaintingCanvasProps {
   candidatesPerStroke?: number;
   /**
    * How per-pixel color error is measured everywhere (stroke scoring, the
-   * running difference total, progress, and the debug check):
+   * running difference total, and progress):
    * - "squared": Euclidean, dr² + dg² + db² — penalizes big mismatches harder.
    * - "absolute": Manhattan, |dr| + |dg| + |db| — more outlier-tolerant.
    */
@@ -154,8 +154,7 @@ export default function PaintingCanvas({
       // Per-channel error contribution, selected once by the metric toggle.
       // "squared" → Euclidean (penalizes big mismatches harder); "absolute" →
       // Manhattan (more outlier-tolerant). Every difference calculation below
-      // routes through this so the scorer, running total, progress, and debug
-      // check always agree.
+      // routes through this so the scorer, running total, and progress agree.
       const useSquared = errorMetric === "squared";
       const channelError = (delta: number): number =>
         useSquared ? delta * delta : Math.abs(delta);
@@ -187,9 +186,9 @@ export default function PaintingCanvas({
       };
 
       // Map a logical coordinate to its device-buffer pixel index along one
-      // axis. Every place that reads back real canvas pixels (reconcile,
-      // rollback, and the debug measurement) MUST use this identical mapping,
-      // or their difference totals drift apart on fractional-DPR displays.
+      // axis. Every place that reads back real canvas pixels (reconcile and
+      // rollback) MUST use this identical mapping, or their difference totals
+      // drift apart on fractional-DPR displays.
       const maxDevX = Math.round(width * dpr) - 1;
       const maxDevY = Math.round(height * dpr) - 1;
       const deviceCoord = (c: number) => Math.round(c * dpr);
@@ -214,7 +213,7 @@ export default function PaintingCanvas({
       // to the next level only when a difference/stall condition is met (see
       // the step loop), not after a fixed number of strokes. At the finest
       // level the process continues indefinitely.
-      const gridStages = [8, 16, 32, 64, 128, 256, 480];
+      const gridStages = [16, 32, 64, 128, 256, 480];
       const totalStages = gridStages.length;
       setStageCount(totalStages);
 
@@ -463,7 +462,7 @@ export default function PaintingCanvas({
       let lastY = height / 2;
 
       // Brush-shrink tracking.
-      // (A) shrink once the difference falls to 2/3 of its value at the last
+      // (A) shrink once the difference falls to 1/5 of its value at the last
       //     shrink; (B) shrink after this many consecutive non-improving moves.
       const SHRINK_DIFFERENCE_RATIO = 1 / 5;
       const SHRINK_NEGATIVE_STREAK = 20;
@@ -522,7 +521,7 @@ export default function PaintingCanvas({
       // pixels in the affected region. Reading back what the canvas really drew
       // (anti-aliased edges, round caps, and all) keeps `currentDifference`
       // exactly equal to the true canvas-vs-target difference — so the scorer's
-      // "before" state is never a lie and the debug check can't find drift.
+      // "before" state is never a lie.
       const commitSegment = (s: Stroke, from: number, to: number) => {
         const [ax, ay] = pointAt(s, from);
         const [bx, by] = pointAt(s, to);
@@ -687,37 +686,6 @@ export default function PaintingCanvas({
         setProgress(Math.min(0.999, Math.max(0, closed)));
       };
 
-      // ---- DEBUG: verify each stroke actually reduces the total difference ----
-      // When enabled, we read the ENTIRE rendered canvas (not the in-memory
-      // mirror) and sum the squared color difference from the target. Comparing
-      // this before vs. after a stroke independently validates both the scorer
-      // and the mirror against the real pixels. This is deliberately expensive
-      // (full-canvas getImageData per stroke), so it's off unless DEBUG_* is set.
-      const DEBUG_VERIFY_STROKES = true;
-      // Captured before a stroke's first segment; compared after it lands.
-      let debugDiffBeforeStroke = 0;
-      let debugStrokeCounter = 0;
-
-      const measureRenderedDifference = (): number => {
-        const data = ctx.getImageData(0, 0, base.width, base.height).data;
-        // The canvas buffer is width*dpr × height*dpr; sample on the logical
-        // grid so indices line up with the target `pixels` (width × height).
-        let total = 0;
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            const sx = deviceX(x);
-            const sy = deviceY(y);
-            const ci = (sy * base.width + sx) * 4;
-            const ti = (y * width + x) * 4;
-            total +=
-              channelError(data[ci] - pixels[ti]) +
-              channelError(data[ci + 1] - pixels[ti + 1]) +
-              channelError(data[ci + 2] - pixels[ti + 2]);
-          }
-        }
-        return total;
-      };
-
       // Shrink the brush to the next finer level. Resets the shrink trackers,
       // rebuilds the cell supply for the new level, and pauses briefly so the
       // size change reads as a distinct step.
@@ -845,9 +813,6 @@ export default function PaintingCanvas({
         // back if the finished stroke turns out to have raised the difference.
         if (from === 0) {
           snapshotStroke(s);
-          if (DEBUG_VERIFY_STROKES) {
-            debugDiffBeforeStroke = measureRenderedDifference();
-          }
         }
 
         commitSegment(s, from, to);
@@ -869,20 +834,6 @@ export default function PaintingCanvas({
             lastY = ey;
           }
           current = null;
-
-          // DEBUG: a kept stroke should never increase the total difference.
-          if (DEBUG_VERIFY_STROKES && !regressed) {
-            const after = measureRenderedDifference();
-            debugStrokeCounter++;
-            if (after > debugDiffBeforeStroke + 1) {
-              console.warn(
-                `[painterly] stroke #${debugStrokeCounter} INCREASED difference ` +
-                  `by ${(after - debugDiffBeforeStroke).toLocaleString()} ` +
-                  `(before ${debugDiffBeforeStroke.toLocaleString()} → after ${after.toLocaleString()}) ` +
-                  `at brush level ${currentStage + 1}`,
-              );
-            }
-          }
         }
 
         updateProgress();
