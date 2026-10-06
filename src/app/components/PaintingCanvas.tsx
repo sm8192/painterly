@@ -25,6 +25,10 @@ interface PaintingCanvasProps {
    * - "absolute": Manhattan, |dr| + |dg| + |db| — more outlier-tolerant.
    */
   errorMetric?: "squared" | "absolute";
+  /** Brush level a fresh paint run should start at (0 = coarsest). */
+  initialLevel?: number;
+  /** Reports the current brush level whenever it changes (incl. on start). */
+  onLevelChange?: (level: number) => void;
 }
 
 /** A cell's sampled color and footprint on the canvas. */
@@ -78,6 +82,8 @@ export default function PaintingCanvas({
   strokeSpeed = 12,
   candidatesPerStroke = 1000,
   errorMetric = "squared",
+  initialLevel = 0,
+  onLevelChange,
 }: PaintingCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
@@ -86,11 +92,16 @@ export default function PaintingCanvas({
   // Filled by the buttons, drained by the paint loop (a ref so it never
   // retriggers the paint effect).
   const levelRequestsRef = useRef<number[]>([]);
-  // The brush level the next paint run should start at. Persists across
-  // replays so "Restart" keeps the current level instead of resetting to 0.
-  const startLevelRef = useRef(0);
-  // Tracks the image currently being painted; a new image resets the level.
-  const lastSrcRef = useRef<string | null>(null);
+
+  // Keep the latest onLevelChange + initialLevel in refs so they aren't paint-
+  // effect deps (reading them must not restart the painting; only replayKey /
+  // src should). The run reads initialLevel once at start.
+  const onLevelChangeRef = useRef(onLevelChange);
+  const initialLevelRef = useRef(initialLevel);
+  useEffect(() => {
+    onLevelChangeRef.current = onLevelChange;
+    initialLevelRef.current = initialLevel;
+  }, [onLevelChange, initialLevel]);
 
   const [progress, setProgress] = useState(0);
   const [isReady, setIsReady] = useState(false);
@@ -110,13 +121,6 @@ export default function PaintingCanvas({
     if (!base) return;
     const ctx = base.getContext("2d");
     if (!ctx) return;
-
-    // A genuinely new image starts coarse; a Restart (same src) keeps the
-    // persisted level.
-    if (lastSrcRef.current !== src) {
-      startLevelRef.current = 0;
-      lastSrcRef.current = src;
-    }
 
     let cancelled = false;
     const image = new Image();
@@ -466,7 +470,7 @@ export default function PaintingCanvas({
       // clamped to the valid range.
       let currentStage = Math.min(
         stages.length - 1,
-        Math.max(0, startLevelRef.current),
+        Math.max(0, Math.round(initialLevelRef.current)),
       );
       let paused = false;
 
@@ -698,9 +702,10 @@ export default function PaintingCanvas({
       const atFinestLevel = () => currentStage >= stages.length - 1;
       const atCoarsestLevel = () => currentStage <= 0;
 
-      // Persist the current level (for Restart) and refresh button enablement.
+      // Report the current level to the parent (so Restart can resume at it)
+      // and refresh button enablement.
       const syncLevelState = () => {
-        startLevelRef.current = currentStage;
+        onLevelChangeRef.current?.(currentStage);
         setCanCrude(!atCoarsestLevel());
         setCanRefine(!atFinestLevel());
       };

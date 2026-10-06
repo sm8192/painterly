@@ -7,6 +7,10 @@ import PaintingCanvas from "./PaintingCanvas";
 export default function PainterlyApp() {
   const [file, setFile] = useState<File | null>(null);
   const [replayKey, setReplayKey] = useState(0);
+  // The brush level the canvas is currently at. Kept here so Restart can
+  // resume at it; reset to 0 (coarsest) only when a new image is chosen.
+  // (State, not a ref, so it can be read during render for the prop.)
+  const [level, setLevel] = useState(0);
 
   // Derive the object URL from the file during render (no effect/setState).
   const url = useMemo(() => (file ? URL.createObjectURL(file) : null), [file]);
@@ -17,17 +21,24 @@ export default function PainterlyApp() {
     return () => URL.revokeObjectURL(url);
   }, [url]);
 
+  const handleLevelChange = useCallback((next: number) => {
+    setLevel(next);
+  }, []);
+
   const handleSelected = useCallback((next: SelectedImage | null) => {
+    setLevel(0); // a new image starts coarse
     setFile(next?.file ?? null);
     setReplayKey((k) => k + 1);
   }, []);
 
   const replay = useCallback(() => {
+    // Keep `level` as-is so Restart resumes at the current brush level.
     setReplayKey((k) => k + 1);
   }, []);
 
   const reset = useCallback(() => {
     // Dropping the file triggers the effect cleanup, which revokes the URL.
+    setLevel(0);
     setFile(null);
   }, []);
 
@@ -43,6 +54,8 @@ export default function PainterlyApp() {
         strokeSpeed={12}
         candidatesPerStroke={1000}
         errorMetric="squared"
+        initialLevel={level}
+        onLevelChange={handleLevelChange}
       />
 
       <div className="flex flex-wrap items-center justify-center gap-3">
