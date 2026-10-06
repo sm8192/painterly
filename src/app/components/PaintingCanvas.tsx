@@ -364,7 +364,8 @@ export default function PaintingCanvas({
       }
 
       // The active cell supply for the current brush level. Rebuilt when a
-      // level is (re)entered or exhausted without shrinking.
+      // level is (re)entered or exhausted without shrinking. Seeded here with a
+      // placeholder; the real level is set below once currentStage is known.
       let activeIndex = new NearestCells(stages[0]);
 
       // Generate one *candidate* stroke for a cell. Candidates share the cell's
@@ -472,6 +473,10 @@ export default function PaintingCanvas({
         stages.length - 1,
         Math.max(0, Math.round(initialLevelRef.current)),
       );
+      // Seed the cell supply from the actual starting level, not stages[0] —
+      // otherwise a Restart at a fine level would paint the coarsest cells
+      // while the controls reflect the fine level.
+      activeIndex = new NearestCells(stages[currentStage]);
       let paused = false;
 
       // Only one stroke is painted at a time. We remember where the last one

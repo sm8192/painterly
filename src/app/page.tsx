@@ -9,7 +9,7 @@ export default function Home() {
             Painterly
           </h1>
           <p className="max-w-md text-lg leading-7 text-zinc-600 dark:text-zinc-400">
-            Upload an image and watch it come to life, one brushstroke at a time.
+            Give me an image and I'll paint it for you.
           </p>
         </header>
 
